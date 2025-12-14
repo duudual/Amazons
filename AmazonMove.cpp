@@ -1,9 +1,3 @@
-// 亚马逊棋（Amazons）简单交互样例程序
-// 随机策略（由zhouhy修改）
-// 作者：dgf123/syys
-// 游戏信息：http://www.botzone.org/games#Amazons
-
-
 #include <iostream>
 #include <string>
 #include <cstdlib>
@@ -422,7 +416,7 @@ double UCT(MCTSNode* parent, MCTSNode* child, double C = 1.414) {
 MCTSNode* selectByUCT(MCTSNode* node) {
     while (!node->children.empty()) {
         MCTSNode* best = nullptr;
-        double bestUCT = -1e100;
+        double bestUCT = -1e10;
         for (auto ch : node->children) {
             double u = UCT(node, ch);
             if (u > bestUCT) {
@@ -458,14 +452,68 @@ MCTSNode* expand(MCTSNode* node) {
     node->fullyExpanded = true;
     return node;
 }
-double simulate(int board[GRIDSIZE][GRIDSIZE], int rootColor, int currentColor, int maxDepth = 20) {
+// 快速评估一个走法的质量（用于模拟阶段的选择）
+double quickEvaluateMove(int board[GRIDSIZE][GRIDSIZE], const Move& m, int color) {
+    int testBoard[GRIDSIZE][GRIDSIZE];
+    copyBoard(testBoard, board);
+    ProcStepOnBoard(testBoard, m.x0, m.y0, m.x1, m.y1, m.x2, m.y2, color);
+    
+    double myScore = judegeNowOnBoard(testBoard, color);
+    double oppScore = judegeNowOnBoard(testBoard, -color);
+    
+    return myScore - oppScore;
+}
+
+// 基于评估值的加权随机选择
+Move selectMoveByWeight(const vector<Move>& moves, int board[GRIDSIZE][GRIDSIZE], int color, double temperature = 1.0) {
+    if (moves.empty()) return Move(-1, -1, -1, -1, -1, -1);
+    
+    vector<double> scores;
+    double minScore = 1e10, maxScore = -1e10;
+    
+    // 计算每个走法的评估值
+    for (const auto& m : moves) {
+        double score = quickEvaluateMove(board, m, color);
+        scores.push_back(score);
+        minScore = min(minScore, score);
+        maxScore = max(maxScore, score);
+    }
+    
+    // 归一化并应用softmax（带温度参数）
+    vector<double> weights;
+    double sum = 0;
+    for (double s : scores) {
+        // 归一化到[0, 1]，然后应用exp
+        double normalized = (maxScore - minScore > 1e-6) ? 
+            (s - minScore) / (maxScore - minScore) : 0.5;
+        double weight = exp(normalized / temperature);
+        weights.push_back(weight);
+        sum += weight;
+    }
+    
+    // 加权随机选择
+    double r = (double)rand() / RAND_MAX * sum;
+    double cumsum = 0;
+    for (int i = 0; i < moves.size(); i++) {
+        cumsum += weights[i];
+        if (r <= cumsum) {
+            return moves[i];
+        }
+    }
+    
+    return moves[moves.size() - 1];
+}
+
+double simulate(int board[GRIDSIZE][GRIDSIZE], int rootColor, int currentColor, int maxDepth = 10) {
     int simBoard[GRIDSIZE][GRIDSIZE];
     copyBoard(simBoard, board);
 
     for (int d = 0; d < maxDepth; d++) {
         vector<Move> mv = getAllMovesOnBoard(simBoard, currentColor);
         if (mv.empty()) break;
-        Move m = mv[rand() % mv.size()];
+        // 使用基于评估的加权随机选择，温度参数随深度增加（后期更随机）
+        double temp = 0.5 + d * 0.1; // 温度从0.5逐渐增加到2.5
+        Move m = selectMoveByWeight(mv, simBoard, currentColor, temp);
         ProcStepOnBoard(simBoard, m.x0, m.y0, m.x1, m.y1, m.x2, m.y2, currentColor);
         currentColor = -currentColor;
     }
