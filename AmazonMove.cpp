@@ -1,3 +1,5 @@
+#define UNICODE
+#define _UNICODE
 #include <iostream>
 #include <string>
 #include <cstdlib>
@@ -7,7 +9,7 @@
 #include<algorithm>
 #include<climits>
 #include<cmath>
-
+#include <fstream>
 
 #define GRIDSIZE 8
 #define OBSTACLE 2
@@ -17,6 +19,12 @@
 #define grid_white -1
 
 using namespace std;
+
+// 棋盘状态快照（用于存盘 & 复盘）
+struct GameSnapshot {
+    int board[GRIDSIZE][GRIDSIZE];
+    int currentTurnColor;
+};
 
 int currBotColor; // 我所执子颜色（1为黑，-1为白，棋盘状态亦同）
 int gridInfo[GRIDSIZE][GRIDSIZE] = { 0 }; // 先x后y，记录棋盘状态
@@ -46,175 +54,6 @@ struct Move {
 		: x0(x0_), y0(y0_), x1(x1_), y1(y1_), x2(x2_), y2(y2_) {}
 };
 
-// // 在坐标处落子，检查是否合法或模拟落子
-// bool ProcStep(int x0, int y0, int x1, int y1, int x2, int y2, int color, bool check_only)
-// {
-// 	if ((!inMap(x0, y0)) || (!inMap(x1, y1)) || (!inMap(x2, y2)))
-// 		return false;
-// 	if (gridInfo[x0][y0] != color || gridInfo[x1][y1] != 0)
-// 		return false;
-// 	if ((gridInfo[x2][y2] != 0) && !(x2 == x0 && y2 == y0))
-// 		return false;
-// 	if (!check_only)
-// 	{
-// 		gridInfo[x0][y0] = 0;
-// 		gridInfo[x1][y1] = color;
-// 		gridInfo[x2][y2] = OBSTACLE;
-// 	}
-// 	return true;
-// }
-
-
-
-// // 检查两个点是否可以直接按照皇后走法到达
-// bool canReach(int x1, int y1, int x2, int y2) {
-// 	if (x1 == x2 && y1 == y2) return true;
-	
-// 	int dx_dir = 0, dy_dir = 0;
-// 	if (x2 != x1) dx_dir = (x2 > x1) ? 1 : -1;
-// 	if (y2 != y1) dy_dir = (y2 > y1) ? 1 : -1;
-	
-// 	if (dx_dir != 0 && dy_dir != 0) {
-// 		// 对角线
-// 		if (abs(x2 - x1) != abs(y2 - y1)) return false;
-// 	} else if (dx_dir == 0 && dy_dir == 0) {
-// 		return false;
-// 	}
-	
-// 	// 检查路径上的所有格子是否为空
-// 	int steps = max(abs(x2 - x1), abs(y2 - y1));
-// 	for (int i = 1; i < steps; ++i) {
-// 		int x = x1 + dx_dir * i;
-// 		int y = y1 + dy_dir * i;
-// 		if (gridInfo[x][y] != 0) return false;
-// 	}
-// 	return true;
-// }
-
-// // queen为起点构建图，然后运行Dijkstra计算最短距离
-// vector<int> dijstra(const vector<Node>& squares, const Node& queen) {
-// 	const int INF = 1e5;
-// 	int n = GRIDSIZE*GRIDSIZE; // squares + queen起点
-// 	vector<int> dist(n, INF);
-	
-// 	// 构建图：节点0是queen起点，节点1到n-1是squares
-// 	// 使用邻接表，边权都是1
-// 	vector<vector<int>> g(n);
-	
-// 	// 构建边：queen-squares
-// 	for (int i = 0; i < squares.size(); ++i) {
-// 		if (canReach(queen.x, queen.y, squares[i].x, squares[i].y)) {
-// 			g[0].push_back(i + 1);
-// 			g[i + 1].push_back(0);
-// 		}
-// 	}
-	
-// 	// 构建边：squares之间
-// 	for (int i = 0; i < squares.size(); ++i) {
-// 		for (int j = i + 1; j < squares.size(); ++j) {
-// 			if (canReach(squares[i].x, squares[i].y, squares[j].x, squares[j].y)) {
-// 				g[i + 1].push_back(j + 1);
-// 				g[j + 1].push_back(i + 1);
-// 			}
-// 		}
-// 	}
-	
-// 	// Dijkstra算法
-// 	dist[0] = 0; // queen起点距离为0
-// 	using P = pair<int, int>; // dist, index
-// 	priority_queue<P, vector<P>, greater<P>> pq;
-// 	pq.push({ 0, 0 });
-	
-// 	while (!pq.empty()) {
-// 		auto [d, u] = pq.top();
-// 		pq.pop();
-// 		if (d != dist[u]) continue;
-// 		for (int v : g[u]) {
-// 			if (dist[v] > d + 1) { // 边权都是1
-// 				dist[v] = d + 1;
-// 				pq.push({ dist[v], v });
-// 			}
-// 		}
-// 	}
-	
-// 	// 返回距离数组，索引0是queen起点，索引1到n-1对应squares
-// 	return dist;
-// }
-
-// //局面判断函数,可到达的空地数目越多,到达所需要的步数越短，得分越高
-// //可直接按照皇后走法走到的两点形成edge,确定起点,可构建无向非负图.用Dijsktra寻找最短路.
-// double judegeNow(int color){
-// 	vector<Node> squares;
-// 	vector<Node> queens;
-// 	for (int i = 0; i < GRIDSIZE; ++i) {
-// 		for (int j = 0; j < GRIDSIZE; ++j) {
-// 			if(gridInfo[i][j]==0){
-// 				squares.push_back(Node(i*GRIDSIZE+j,i,j));
-// 			}
-// 			if(gridInfo[i][j]==color){
-// 				queens.push_back(Node(i*GRIDSIZE+j,i,j));
-// 			}
-// 		}
-// 	}
-
-// 	const int INF = 1e5;
-// 	vector<int> glodis(squares.size(),INF);
-
-// 	for(auto queen:queens){
-// 		// 以当前皇后为起点构建图，计算到所有squares的最短距离
-// 		vector<int> dist = dijstra(squares, queen);
-// 		for (int i = 1; i < dist.size(); ++i) {
-// 			if (dist[i] != INF) {
-// 				glodis[i-1] = min(glodis[i-1], dist[i]); //glodis没有起点,i-1
-// 				// glodis[i] += dist[i];// 可选：所有的最短距离相加,需要将起始距离改为0
-// 			}
-// 		}
-// 	}
-
-// 	double score = 0;
-// 	for(auto dis:glodis){
-// 		if(dis!=INF){
-// 			score += 1.0/dis;
-// 		}
-// 	}
-// 	// 对局结束
-// 	if(score == 0){
-// 		score = INF;
-// 	}
-// 	return score;
-// }
-
-// // 复用示例代码
-// vector<Move> getAllMoves(int color) {
-// 	vector<Move> moves;
-// 	for (int i = 0; i < GRIDSIZE; ++i) {
-// 		for (int j = 0; j < GRIDSIZE; ++j) {
-// 			if (gridInfo[i][j] != color) continue;
-// 			for (int k = 0; k < 8; ++k) {
-// 				for (int delta1 = 1; delta1 < GRIDSIZE; delta1++) {
-// 					int xx = i + dx[k] * delta1;
-// 					int yy = j + dy[k] * delta1;
-// 					if (gridInfo[xx][yy] != 0 || !inMap(xx, yy))
-// 						break;
-// 					for (int l = 0; l < 8; ++l) {
-// 						for (int delta2 = 1; delta2 < GRIDSIZE; delta2++) {
-// 							int xxx = xx + dx[l] * delta2;
-// 							int yyy = yy + dy[l] * delta2;
-// 							if (!inMap(xxx, yyy))
-// 								break;
-// 							if (gridInfo[xxx][yyy] != 0 && !(i == xxx && j == yyy))
-// 								break;
-// 							if (ProcStep(i, j, xx, yy, xxx, yyy, color, true)) {
-// 								moves.push_back(Move(i, j, xx, yy, xxx, yyy));
-// 							}
-// 						}
-// 					}
-// 				}
-// 			}
-// 		}
-// 	}
-// 	return moves;
-// }
 
 void copyBoard(int dst[GRIDSIZE][GRIDSIZE], int src[GRIDSIZE][GRIDSIZE]) {
     for (int i = 0; i < GRIDSIZE; ++i) {
@@ -298,92 +137,65 @@ vector<Move> getAllMovesOnBoard(int board[GRIDSIZE][GRIDSIZE], int color) {
 	return moves;
 }
 
-// 在指定棋盘上运行Dijkstra
-vector<int> dijstraOnBoard(int board[GRIDSIZE][GRIDSIZE], const vector<Node>& squares, const Node& queen) {
-	const int INF = 1e5;
-	int n = GRIDSIZE*GRIDSIZE;
-	vector<int> dist(n, INF);
-	
-	vector<vector<int>> g(n);
-	
-	// 构建边：queen-squares
-	for (int i = 0; i < squares.size(); ++i) {
-		if (canReachOnBoard(board, queen.x, queen.y, squares[i].x, squares[i].y)) {
-			g[0].push_back(i + 1);
-			g[i + 1].push_back(0);
-		}
-	}
-	
-	// 构建边：squares之间
-	for (int i = 0; i < squares.size(); ++i) {
-		for (int j = i + 1; j < squares.size(); ++j) {
-			if (canReachOnBoard(board, squares[i].x, squares[i].y, squares[j].x, squares[j].y)) {
-				g[i + 1].push_back(j + 1);
-				g[j + 1].push_back(i + 1);
-			}
-		}
-	}
-	
-	// Dijkstra算法
-	dist[0] = 0;
-	using P = pair<int, int>;
-	priority_queue<P, vector<P>, greater<P>> pq;
-	pq.push({ 0, 0 });
-	
-	while (!pq.empty()) {
-		auto top = pq.top();
-		int d = top.first;
-		int u = top.second;
-		pq.pop();
-		if (d != dist[u]) continue;
-		for (int v : g[u]) {
-			if (dist[v] > d + 1) {
-				dist[v] = d + 1;
-				pq.push({ dist[v], v });
-			}
-		}
-	}
-	
-	return dist;
+// 占地记录
+int blackDist[GRIDSIZE][GRIDSIZE];
+int whiteDist[GRIDSIZE][GRIDSIZE];
+
+// bfs计算从特定颜色棋子出发，到达全图的最短步数
+void bfsTerritory(int board[GRIDSIZE][GRIDSIZE], int color, int distMap[GRIDSIZE][GRIDSIZE]) {
+    for(int i=0; i<GRIDSIZE; i++) 
+        for(int j=0; j<GRIDSIZE; j++) 
+            distMap[i][j] = 9999;
+
+    queue<pair<int, int>> q;
+    
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            if(board[i][j] == color) {
+                distMap[i][j] = 0;
+                q.push({i, j});
+            }
+        }
+    }
+
+    while(!q.empty()) {
+        auto [cx, cy] = q.front();
+        q.pop();
+
+        for(int k=0; k<8; k++) {
+            int nx = cx + dx[k];
+            int ny = cy + dy[k];
+            
+            if(inMap(nx, ny) && board[nx][ny] == 0) {
+                if(distMap[nx][ny] > distMap[cx][cy] + 1) {
+                    distMap[nx][ny] = distMap[cx][cy] + 1;
+                    q.push({nx, ny});
+                }
+            }
+        }
+    }
 }
 
-// 在指定棋盘上评估局面
-double judegeNowOnBoard(int board[GRIDSIZE][GRIDSIZE], int color) {
-	vector<Node> squares;
-	vector<Node> queens;
-	for (int i = 0; i < GRIDSIZE; ++i) {
-		for (int j = 0; j < GRIDSIZE; ++j) {
-			if(board[i][j] == 0){
-				squares.push_back(Node(i*GRIDSIZE+j,i,j));
-			}
-			if(board[i][j] == color){
-				queens.push_back(Node(i*GRIDSIZE+j,i,j));
-			}
-		}
-	}
+// 得分
+double quickScore(int board[GRIDSIZE][GRIDSIZE], int myColor) {
+    bfsTerritory(board, grid_black, blackDist);
+    bfsTerritory(board, grid_white, whiteDist);
 
-	const int INF = 1e5;
-	vector<int> glodis(squares.size(), INF);
-
-	for(auto queen:queens){
-		vector<int> dist = dijstraOnBoard(board, squares, queen);
-		for (int i = 1; i < dist.size(); ++i) {
-			if (dist[i] != INF) {
-				glodis[i-1] = min(glodis[i-1], dist[i]);
-			}
-		}
-	}
-
-	double score = 0;
-	for(auto dis:glodis){
-		if(dis != INF){
-			score += 1.0/dis;
-		}
-	}
-	if(score == 0){
-		score = INF;
-	}
-	return score;
+    double score = 0;
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            if(board[i][j] == 0) {
+                int b = blackDist[i][j];
+                int w = whiteDist[i][j];
+                if(b < w) score -= 1.0; 
+                else if (w < b) score += 1.0; 
+                else if (b!=9999) score += 0.0; 
+            }
+        }
+    }
+    // 如果是白方(grid_white = -1)，正分好；如果是黑方(1)，负分好
+    if (myColor == grid_white) return score; 
+    else return -score;
 }
 
 // < -------- MC --------- >//
@@ -452,77 +264,34 @@ MCTSNode* expand(MCTSNode* node) {
     node->fullyExpanded = true;
     return node;
 }
-// 快速评估一个走法的质量（用于模拟阶段的选择）
-double quickEvaluateMove(int board[GRIDSIZE][GRIDSIZE], const Move& m, int color) {
-    int testBoard[GRIDSIZE][GRIDSIZE];
-    copyBoard(testBoard, board);
-    ProcStepOnBoard(testBoard, m.x0, m.y0, m.x1, m.y1, m.x2, m.y2, color);
-    
-    double myScore = judegeNowOnBoard(testBoard, color);
-    double oppScore = judegeNowOnBoard(testBoard, -color);
-    
-    return myScore - oppScore;
-}
 
-// 基于评估值的加权随机选择
-Move selectMoveByWeight(const vector<Move>& moves, int board[GRIDSIZE][GRIDSIZE], int color, double temperature = 1.0) {
-    if (moves.empty()) return Move(-1, -1, -1, -1, -1, -1);
-    
-    vector<double> scores;
-    double minScore = 1e10, maxScore = -1e10;
-    
-    // 计算每个走法的评估值
-    for (const auto& m : moves) {
-        double score = quickEvaluateMove(board, m, color);
-        scores.push_back(score);
-        minScore = min(minScore, score);
-        maxScore = max(maxScore, score);
-    }
-    
-    // 归一化并应用softmax（带温度参数）
-    vector<double> weights;
-    double sum = 0;
-    for (double s : scores) {
-        // 归一化到[0, 1]，然后应用exp
-        double normalized = (maxScore - minScore > 1e-6) ? 
-            (s - minScore) / (maxScore - minScore) : 0.5;
-        double weight = exp(normalized / temperature);
-        weights.push_back(weight);
-        sum += weight;
-    }
-    
-    // 加权随机选择
-    double r = (double)rand() / RAND_MAX * sum;
-    double cumsum = 0;
-    for (int i = 0; i < moves.size(); i++) {
-        cumsum += weights[i];
-        if (r <= cumsum) {
-            return moves[i];
-        }
-    }
-    
-    return moves[moves.size() - 1];
-}
 
-double simulate(int board[GRIDSIZE][GRIDSIZE], int rootColor, int currentColor, int maxDepth = 10) {
+double simulate(int board[GRIDSIZE][GRIDSIZE], int rootColor, int currentColor, int maxDepth = 20) { // 深度稍微加深
     int simBoard[GRIDSIZE][GRIDSIZE];
     copyBoard(simBoard, board);
 
     for (int d = 0; d < maxDepth; d++) {
+        // 1. 获取所有合法走法
         vector<Move> mv = getAllMovesOnBoard(simBoard, currentColor);
-        if (mv.empty()) break;
-        // 使用基于评估的加权随机选择，温度参数随深度增加（后期更随机）
-        double temp = 0.5 + d * 0.1; // 温度从0.5逐渐增加到2.5
-        Move m = selectMoveByWeight(mv, simBoard, currentColor, temp);
+        if (mv.empty()) {
+            // currentColor 输了 -> rootColor 赢了吗？
+            if (currentColor != rootColor) return 1.0; // 对手无路可走，我赢了
+            else return -1.0; // 我无路可走，输了
+        }
+
+        // 2. 极速选择：随机选择！(不要评估！)
+        // 只有纯随机，MCTS 的迭代次数才能上去
+        int r = rand() % mv.size();
+        Move m = mv[r];
+        
         ProcStepOnBoard(simBoard, m.x0, m.y0, m.x1, m.y1, m.x2, m.y2, currentColor);
         currentColor = -currentColor;
     }
 
-    double myScore = judegeNowOnBoard(simBoard, rootColor);
-    double oppScore = judegeNowOnBoard(simBoard, -rootColor);
-
-    return myScore - oppScore;
+    // 达到最大深度仍未分胜负，使用快速评分函数
+    return quickScore(simBoard, rootColor);
 }
+
 void backpropagate(MCTSNode* node, double value) {
     while (node != nullptr) {
         node->N++;
@@ -567,10 +336,7 @@ Move monteCarloSearch(int color, int ITER) {
 }
 // < -------- MC --------- >//
 
-
-
-int main()
-{
+int main() {
 	int x0, y0, x1, y1, x2, y2;
 
 	// 初始化棋盘
@@ -596,16 +362,14 @@ int main()
 		if (x0 == -1)
 			currBotColor = grid_black; // 第一回合收到坐标是-1, -1，说明我是黑方
 		else
-			// ProcStep(x0, y0, x1, y1, x2, y2, -currBotColor, false); // 模拟对方落子
 			ProcStepOnBoard(gridInfo,x0, y0, x1, y1, x2, y2, -currBotColor); // 模拟对方落子
 
-																	// 然后是自己当时的行动
-																	// 对手行动总比自己行动多一个
+		// 然后是自己当时的行动
+		// 对手行动总比自己行动多一个
 		if (i < turnID - 1)
 		{
 			cin >> x0 >> y0 >> x1 >> y1 >> x2 >> y2;
 			if (x0 >= 0)
-				// ProcStep(x0, y0, x1, y1, x2, y2, currBotColor, false); // 模拟己方落子
 				ProcStepOnBoard(gridInfo, x0, y0, x1, y1, x2, y2, currBotColor); // 模拟己方落子
 		}
 	}
@@ -614,7 +378,7 @@ int main()
 
 	// 使用蒙特卡洛模拟选择最优走法
 	srand(time(0));
-	Move bestMove = monteCarloSearch(currBotColor, 30); // 每个走法模拟30次
+	Move bestMove = monteCarloSearch(currBotColor, 10000); 
 	
 	int startX, startY, resultX, resultY, obstacleX, obstacleY;
 	if (bestMove.x0 >= 0) {
