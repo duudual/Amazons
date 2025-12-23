@@ -4,6 +4,7 @@
         "utility": "cpp",
         "xutility": "cpp",
         "climits": "cpp",
-        "iostream": "cpp"
+        "iostream": "cpp",
+        "thread": "cpp"
     }
 }
