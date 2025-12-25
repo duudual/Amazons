@@ -36,15 +36,16 @@ int gridInfo[GRIDSIZE][GRIDSIZE] = { 0 }; // 先x后y，记录棋盘状态
 int dx[] = { -1,-1,-1,0,0,1,1,1 };
 int dy[] = { -1,0,1,-1,1,-1,0,1 };
 
-int searchDepth = 3; // Alpha-Beta搜索深度
+int searchDepth = 2; // Alpha-Beta搜索深度
 const int K1_QUEEN_MOVES = 80;   // 第一阶段保留的皇后移动位置数
-const int K2_FULL_MOVES = 50;    // 第二阶段保留的完整走法数
+const int K2_FULL_MOVES = 30;    // 第二阶段保留的完整走法数
 const int INF = 1000000000; // 无穷大值
 
 // 权重参数
 const int WEIGHT_CONNECTIVITY = 10;  // 联通点权重
 const int WEIGHT_MOBILITY = 3;       // 灵活性权重
 const int WEIGHT_CENTER = 1;         // 中心性权重
+
 
 // 路径结构：存储从起点到终点的所有点
 struct Path {
@@ -489,7 +490,7 @@ struct QueenMove {
 };
 
 // 第一阶段：评估皇后移动位置的得分
-// 评分标准：灵活性（周围可移动格子数）+ 中心性 + 3x3空白点（远离障碍和边界）
+// 评分标准：灵活性（周围可移动格子数）+ 中心性
 int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1, int color) {
     // 临时移动皇后
     int tempBoard[GRIDSIZE][GRIDSIZE];
@@ -503,19 +504,7 @@ int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1
     // 计算中心性
     int center = centerScore(x1, y1);
     
-    // 统计3x3范围内的空白点个数（越多说明离障碍和边界越远）
-    int emptyCount = 0;
-    for(int di = -1; di <= 1; di++) {
-        for(int dj = -1; dj <= 1; dj++) {
-            int ni = x1 + di;
-            int nj = y1 + dj;
-            if(inMap(ni, nj) && tempBoard[ni][nj] == 0) {
-                emptyCount++;
-            }
-        }
-    }
-    
-    return mobility * 3 + center + emptyCount * 2;  // 灵活性权重最高，空白点次之
+    return mobility * 3 + center;  // 灵活性权重更高
 }
 
 // 第一阶段：生成并筛选前K1个最佳皇后移动位置
@@ -556,42 +545,21 @@ vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color
 }
 
 // 第二阶段：对走法评分（完整走法 = 皇后移动 + 射箭）
-// 使用快速启发式评分：隔断性 + 阻止对手灵活性
 int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
-    // 不需要执行完整走法，只需评估障碍位置
-    int x2 = move.x2, y2 = move.y2;
-    
-    // 1. 隔断性：统计障碍位置周围8个方向的障碍物/边界个数（越多越好，说明容易形成闭合）
-    int blockCount = 0;
-    for(int k = 0; k < 8; k++) {
-        int nx = x2 + dx[k];
-        int ny = y2 + dy[k];
-        // 边界或已有障碍物/棋子
-        if(!inMap(nx, ny) || board[nx][ny] == OBSTACLE) {
-            blockCount++;
-        }
+    // 执行走法
+    int tempBoard[GRIDSIZE][GRIDSIZE];
+    copyBoard(tempBoard, board);
+    if(!ProcStepOnBoard(tempBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color)) {
+        return -INF;  // 无效走法
     }
-    
-    // 2. 阻止对手灵活性：统计障碍位置周围一圈的对手棋子个数（越多越好，说明阻挡了对手的移动）
-    int oppCount = 0;
-    int oppColor = -color;
-    for(int k = 0; k < 8; k++) {
-        int nx = x2 + dx[k];
-        int ny = y2 + dy[k];
-        if(inMap(nx, ny) && board[nx][ny] == oppColor) {
-            oppCount++;
-        }
-    }
-    
-    // 综合评分：隔断性权重更高
-    return blockCount * 10 + oppCount * 5;
+    // 计算局面差（走法得分 = 新局面评分）
+    return evaluateBoard(tempBoard, color);
 }
 
 // 第二阶段：从选定的皇后移动生成完整走法，并筛选前K2个
 vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE], 
                                    const vector<QueenMove>& queenMoves, 
                                    int color, int k2) {
-    
     vector<pair<int, Move>> scoredMoves;  // (score, move)
     
     for(const auto& qm : queenMoves) {
@@ -600,7 +568,6 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
         copyBoard(tempBoard, board);
         tempBoard[qm.x0][qm.y0] = 0;
         tempBoard[qm.x1][qm.y1] = color;
-        
         // 生成所有可能的射箭位置
         for(int k = 0; k < 8; k++) {
             for(int delta = 1; delta < GRIDSIZE; delta++) {
@@ -616,11 +583,13 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
                 Move fullMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2);
                 int score = scoreFullMove(board, fullMove, color);
                 
-                scoredMoves.push_back({score, fullMove});
+                if(score > -INF) {
+                    scoredMoves.push_back({score, fullMove});
+                }
             }
         }
+        
     }
-    
     // 按得分降序排序
     sort(scoredMoves.begin(), scoredMoves.end(),
          [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
@@ -790,16 +759,14 @@ int main(){
 		if (x0 == -1)
 			currBotColor = grid_black; // 第一回合收到坐标是-1, -1，说明我是黑方
 		else
-			// ProcStep(x0, y0, x1, y1, x2, y2, -currBotColor, false); // 模拟对方落子
 			ProcStepOnBoard(gridInfo,x0, y0, x1, y1, x2, y2, -currBotColor); // 模拟对方落子
 
-																	// 然后是自己当时的行动
-																	// 对手行动总比自己行动多一个
+		// 然后是自己当时的行动
+		// 对手行动总比自己行动多一个
 		if (i < turnID - 1)
 		{
 			cin >> x0 >> y0 >> x1 >> y1 >> x2 >> y2;
 			if (x0 >= 0)
-				// ProcStep(x0, y0, x1, y1, x2, y2, currBotColor, false); // 模拟己方落子
 				ProcStepOnBoard(gridInfo, x0, y0, x1, y1, x2, y2, currBotColor); // 模拟己方落子
 		}
 	}

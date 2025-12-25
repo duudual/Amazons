@@ -38,47 +38,25 @@ int gridInfo[GRIDSIZE][GRIDSIZE] = { 0 }; // 先x后y，记录棋盘状态
 int dx[] = { -1,-1,-1,0,0,1,1,1 };
 int dy[] = { -1,0,1,-1,1,-1,0,1 };
 
-int searchDepth = 2; // Alpha-Beta搜索深度
+int searchDepth = 3; // Alpha-Beta搜索深度
 const int K1_QUEEN_MOVES = 80;   // 第一阶段保留的皇后移动位置数
-const int K2_FULL_MOVES = 30;    // 第二阶段保留的完整走法数
+const int K2_FULL_MOVES = 50;    // 第二阶段保留的完整走法数
 const int INF = 1000000000; // 无穷大值
 
 // 性能分析统计
 struct PerfStats {
-    double phase1Time = 0;  // 第一阶段耗时（毫秒）
-    double phase2Time = 0;  // 第二阶段耗时（毫秒）
-    double totalGenMoveTime = 0;  // 总的走法生成耗时
-    double totalSearchTime = 0;  // Alpha-Beta搜索总耗时
-    int phase1Calls = 0;  // 第一阶段调用次数
-    int phase2Calls = 0;  // 第二阶段调用次数
+    double totalGenMoveTime = 0;  // move候选两阶段总耗时（毫秒）
+    double totalTime = 0;  // 这次操作总耗时（毫秒）
     
     void reset() {
-        phase1Time = 0;
-        phase2Time = 0;
         totalGenMoveTime = 0;
-        totalSearchTime = 0;
-        phase1Calls = 0;
-        phase2Calls = 0;
+        totalTime = 0;
     }
     
     void printStats() const {
-        cout << "\n========== 性能分析统计 ==========\n";
-        cout << "第一阶段（皇后移动筛选）:\n";
-        cout << "  总耗时: " << phase1Time << " ms\n";
-        cout << "  调用次数: " << phase1Calls << "\n";
-        if(phase1Calls > 0) {
-            cout << "  平均耗时: " << phase1Time / phase1Calls << " ms\n";
-        }
-        
-        cout << "第二阶段（完整走法筛选）:\n";
-        cout << "  总耗时: " << phase2Time << " ms\n";
-        cout << "  调用次数: " << phase2Calls << "\n";
-        if(phase2Calls > 0) {
-            cout << "  平均耗时: " << phase2Time / phase2Calls << " ms\n";
-        }
-        
-        cout << "走法生成总耗时: " << totalGenMoveTime << " ms\n";
-        cout << "Alpha-Beta搜索总耗时: " << totalSearchTime << " ms\n";
+        cout << "\n========== 时间统计 ==========\n";
+        cout << "Move候选生成时间: " << totalGenMoveTime << " ms\n";
+        cout << "总耗时: " << totalTime << " ms\n";
         cout << "================================\n";
     }
 } perfStats;
@@ -544,7 +522,7 @@ struct QueenMove {
 };
 
 // 第一阶段：评估皇后移动位置的得分
-// 评分标准：灵活性（周围可移动格子数）+ 中心性
+// 评分标准：灵活性（周围可移动格子数）+ 中心性 + 3x3空白点（远离障碍和边界）
 int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1, int color) {
     // 临时移动皇后
     int tempBoard[GRIDSIZE][GRIDSIZE];
@@ -558,14 +536,23 @@ int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1
     // 计算中心性
     int center = centerScore(x1, y1);
     
-    return mobility * 3 + center;  // 灵活性权重更高
+    // 统计3x3范围内的空白点个数（越多说明离障碍和边界越远）
+    int emptyCount = 0;
+    for(int di = -1; di <= 1; di++) {
+        for(int dj = -1; dj <= 1; dj++) {
+            int ni = x1 + di;
+            int nj = y1 + dj;
+            if(inMap(ni, nj) && tempBoard[ni][nj] == 0) {
+                emptyCount++;
+            }
+        }
+    }
+    
+    return mobility * 3 + center + emptyCount * 2;  // 灵活性权重最高，空白点次之
 }
 
 // 第一阶段：生成并筛选前K1个最佳皇后移动位置
 vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color, int k1) {
-    auto startTime = chrono::high_resolution_clock::now();
-    perfStats.phase1Calls++;
-    
     vector<QueenMove> allQueenMoves;
     
     // 遍历所有该颜色的皇后
@@ -598,32 +585,45 @@ vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color
         allQueenMoves.resize(k1);
     }
     
-    auto endTime = chrono::high_resolution_clock::now();
-    auto duration = chrono::duration_cast<chrono::microseconds>(endTime - startTime).count();
-    perfStats.phase1Time += duration / 1000.0;  // 转换为毫秒
-    
     return allQueenMoves;
 }
 
 // 第二阶段：对走法评分（完整走法 = 皇后移动 + 射箭）
+// 使用快速启发式评分：隔断性 + 阻止对手灵活性
 int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
-    // 执行走法
-    int tempBoard[GRIDSIZE][GRIDSIZE];
-    copyBoard(tempBoard, board);
-    if(!ProcStepOnBoard(tempBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color)) {
-        return -INF;  // 无效走法
+    // 不需要执行完整走法，只需评估障碍位置
+    int x2 = move.x2, y2 = move.y2;
+    
+    // 1. 隔断性：统计障碍位置周围8个方向的障碍物/边界个数（越多越好，说明容易形成闭合）
+    int blockCount = 0;
+    for(int k = 0; k < 8; k++) {
+        int nx = x2 + dx[k];
+        int ny = y2 + dy[k];
+        // 边界或已有障碍物/棋子
+        if(!inMap(nx, ny) || board[nx][ny] == OBSTACLE) {
+            blockCount++;
+        }
     }
     
-    // 计算局面差（走法得分 = 新局面评分）
-    return evaluateBoard(tempBoard, color);
+    // 2. 阻止对手灵活性：统计障碍位置周围一圈的对手棋子个数（越多越好，说明阻挡了对手的移动）
+    int oppCount = 0;
+    int oppColor = -color;
+    for(int k = 0; k < 8; k++) {
+        int nx = x2 + dx[k];
+        int ny = y2 + dy[k];
+        if(inMap(nx, ny) && board[nx][ny] == oppColor) {
+            oppCount++;
+        }
+    }
+    
+    // 综合评分：隔断性权重更高
+    return blockCount * 10 + oppCount * 5;
 }
 
 // 第二阶段：从选定的皇后移动生成完整走法，并筛选前K2个
 vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE], 
                                    const vector<QueenMove>& queenMoves, 
                                    int color, int k2) {
-    auto startTime = chrono::high_resolution_clock::now();
-    perfStats.phase2Calls++;
     
     vector<pair<int, Move>> scoredMoves;  // (score, move)
     
@@ -633,7 +633,6 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
         copyBoard(tempBoard, board);
         tempBoard[qm.x0][qm.y0] = 0;
         tempBoard[qm.x1][qm.y1] = color;
-        
         // 生成所有可能的射箭位置
         for(int k = 0; k < 8; k++) {
             for(int delta = 1; delta < GRIDSIZE; delta++) {
@@ -649,13 +648,11 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
                 Move fullMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2);
                 int score = scoreFullMove(board, fullMove, color);
                 
-                if(score > -INF) {
-                    scoredMoves.push_back({score, fullMove});
-                }
+                scoredMoves.push_back({score, fullMove});
             }
         }
+        
     }
-    
     // 按得分降序排序
     sort(scoredMoves.begin(), scoredMoves.end(),
          [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
@@ -667,10 +664,6 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
         result.push_back(scoredMoves[i].second);
     }
     
-    auto endTime = chrono::high_resolution_clock::now();
-    auto duration = chrono::duration_cast<chrono::microseconds>(endTime - startTime).count();
-    perfStats.phase2Time += duration / 1000.0;  // 转换为毫秒
-    
     return result;
 }
 
@@ -680,14 +673,13 @@ vector<Move> generateMovesWithTwoPhase(int board[GRIDSIZE][GRIDSIZE], int color)
     
     // 第一阶段：生成并筛选皇后移动位置
     vector<QueenMove> topQueenMoves = generateTopQueenMoves(board, color, K1_QUEEN_MOVES);
-    
     if(topQueenMoves.empty()) {
         return vector<Move>();  // 无法移动
     }
     
     // 第二阶段：生成并筛选完整走法
     vector<Move> topFullMoves = generateTopFullMoves(board, topQueenMoves, color, K2_FULL_MOVES);
-    
+
     auto phaseEndTime = chrono::high_resolution_clock::now();
     auto phaseDuration = chrono::duration_cast<chrono::microseconds>(phaseEndTime - phaseStartTime).count();
     perfStats.totalGenMoveTime += phaseDuration / 1000.0;  // 转换为毫秒
@@ -699,8 +691,7 @@ vector<Move> generateMovesWithTwoPhase(int board[GRIDSIZE][GRIDSIZE], int color)
 
 // Alpha-Beta剪枝搜索（带置换表 + 两阶段走法生成）
 int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int beta, 
-                    int color, Move& bestMove, long long hash, double* pSearchTime = nullptr) {
-    auto searchStartTime = chrono::high_resolution_clock::now();
+                    int color, Move& bestMove, long long hash) {
     // 查询置换表
     int ttIndex = (hash & 0x7FFFFFFFFFFFFFFF) % TT_SIZE;
     TTEntry* ttEntry = &transpositionTable[ttIndex];
@@ -757,8 +748,7 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
         newHash ^= zobristBlackTurn;
         
         Move oppBestMove;
-        double oppSearchTime = 0;
-        int score = -alphaBetaSearch(newBoard, depth - 1, -beta, -alpha, -color, oppBestMove, newHash, &oppSearchTime);
+        int score = -alphaBetaSearch(newBoard, depth - 1, -beta, -alpha, -color, oppBestMove, newHash);
         
         if(score > bestScore) {
             bestScore = score;
@@ -787,18 +777,16 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
     
     bestMove = localBestMove;
     
-    auto searchEndTime = chrono::high_resolution_clock::now();
-    auto searchDuration = chrono::duration_cast<chrono::microseconds>(searchEndTime - searchStartTime).count();
-    if(pSearchTime) {
-        *pSearchTime += searchDuration / 1000.0;  // 转换为毫秒
-    }
-    perfStats.totalSearchTime += searchDuration / 1000.0;  // 转换为毫秒
-    
     return bestScore;
 }
 
 // 迭代加深搜索
 Move iterativeDeepeningSearch(int color, int maxDepth) {
+    auto totalStartTime = chrono::high_resolution_clock::now();
+    
+    // 重置性能统计
+    perfStats.reset();
+    
     // initZobrist();
     Move bestMove;
     long long hash = computeHash(gridInfo, color);
@@ -815,6 +803,13 @@ Move iterativeDeepeningSearch(int color, int maxDepth) {
         // 输出调试信息
         cout << "[Alpha-Beta] Depth " << depth << ": score = " << score << endl;
     }
+    
+    auto totalEndTime = chrono::high_resolution_clock::now();
+    auto totalDuration = chrono::duration_cast<chrono::microseconds>(totalEndTime - totalStartTime).count();
+    perfStats.totalTime = totalDuration / 1000.0;  // 转换为毫秒
+    
+    // 输出详细的性能统计
+    perfStats.printStats();
     
     return bestMove;
 }

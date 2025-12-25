@@ -1,6 +1,8 @@
+//该版本的move候选阶段二直接用局面评判得分
 #define UNICODE
 #define _UNICODE
 
+#include <SFML/Graphics.hpp>
 #include <iostream>
 #include <string>
 #include <cstdlib>
@@ -14,6 +16,7 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <chrono>
 
 #define GRIDSIZE 8
 #define CELL 80
@@ -36,15 +39,34 @@ int gridInfo[GRIDSIZE][GRIDSIZE] = { 0 }; // 先x后y，记录棋盘状态
 int dx[] = { -1,-1,-1,0,0,1,1,1 };
 int dy[] = { -1,0,1,-1,1,-1,0,1 };
 
-int searchDepth = 3; // Alpha-Beta搜索深度
+int searchDepth = 2; // Alpha-Beta搜索深度
 const int K1_QUEEN_MOVES = 80;   // 第一阶段保留的皇后移动位置数
-const int K2_FULL_MOVES = 50;    // 第二阶段保留的完整走法数
+const int K2_FULL_MOVES = 30;    // 第二阶段保留的完整走法数
 const int INF = 1000000000; // 无穷大值
+
+// 性能分析统计
+struct PerfStats {
+    double totalGenMoveTime = 0;  // 总的走法生成耗时
+    double totalTime = 0;  // 总耗时（迭代加深搜索）
+    
+    void reset() {
+        totalGenMoveTime = 0;
+        totalTime = 0;
+    }
+    
+    void printStats() const {
+        cout << "\n========== time cost ==========\n";
+        cout << "total move generation time: " << totalGenMoveTime << " ms\n";
+        cout << "total time: " << totalTime << " ms\n";
+        cout << "================================\n";
+    }
+} perfStats;
 
 // 权重参数
 const int WEIGHT_CONNECTIVITY = 10;  // 联通点权重
 const int WEIGHT_MOBILITY = 3;       // 灵活性权重
 const int WEIGHT_CENTER = 1;         // 中心性权重
+
 
 // 路径结构：存储从起点到终点的所有点
 struct Path {
@@ -66,6 +88,18 @@ enum GameStatus {
     WHITE_WIN = 2,       // 白方胜
     DRAW = 3             // 平局
 };
+
+// GUI 相关变量
+int currentTurn = grid_black;
+bool humanIsBlack = true;
+int selX = -1, selY = -1;
+int moveX = -1, moveY = -1;
+vector<Path> validMovePaths;  // 可移动的路径
+vector<Path> validObstaclePaths;  // 可放置障碍的路径
+GameStatus gameStatus = GAME_ONGOING;  // 游戏状态
+bool needAIMove = false;  // 是否需要AI走棋（用于延迟AI走棋，先显示人类走棋结果）
+
+
 
 
 // 判断是否在地图内
@@ -489,7 +523,7 @@ struct QueenMove {
 };
 
 // 第一阶段：评估皇后移动位置的得分
-// 评分标准：灵活性（周围可移动格子数）+ 中心性 + 3x3空白点（远离障碍和边界）
+// 评分标准：灵活性（周围可移动格子数）+ 中心性
 int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1, int color) {
     // 临时移动皇后
     int tempBoard[GRIDSIZE][GRIDSIZE];
@@ -503,19 +537,7 @@ int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1
     // 计算中心性
     int center = centerScore(x1, y1);
     
-    // 统计3x3范围内的空白点个数（越多说明离障碍和边界越远）
-    int emptyCount = 0;
-    for(int di = -1; di <= 1; di++) {
-        for(int dj = -1; dj <= 1; dj++) {
-            int ni = x1 + di;
-            int nj = y1 + dj;
-            if(inMap(ni, nj) && tempBoard[ni][nj] == 0) {
-                emptyCount++;
-            }
-        }
-    }
-    
-    return mobility * 3 + center + emptyCount * 2;  // 灵活性权重最高，空白点次之
+    return mobility * 3 + center;  // 灵活性权重更高
 }
 
 // 第一阶段：生成并筛选前K1个最佳皇后移动位置
@@ -556,42 +578,21 @@ vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color
 }
 
 // 第二阶段：对走法评分（完整走法 = 皇后移动 + 射箭）
-// 使用快速启发式评分：隔断性 + 阻止对手灵活性
 int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
-    // 不需要执行完整走法，只需评估障碍位置
-    int x2 = move.x2, y2 = move.y2;
-    
-    // 1. 隔断性：统计障碍位置周围8个方向的障碍物/边界个数（越多越好，说明容易形成闭合）
-    int blockCount = 0;
-    for(int k = 0; k < 8; k++) {
-        int nx = x2 + dx[k];
-        int ny = y2 + dy[k];
-        // 边界或已有障碍物/棋子
-        if(!inMap(nx, ny) || board[nx][ny] == OBSTACLE) {
-            blockCount++;
-        }
+    // 执行走法
+    int tempBoard[GRIDSIZE][GRIDSIZE];
+    copyBoard(tempBoard, board);
+    if(!ProcStepOnBoard(tempBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color)) {
+        return -INF;  // 无效走法
     }
-    
-    // 2. 阻止对手灵活性：统计障碍位置周围一圈的对手棋子个数（越多越好，说明阻挡了对手的移动）
-    int oppCount = 0;
-    int oppColor = -color;
-    for(int k = 0; k < 8; k++) {
-        int nx = x2 + dx[k];
-        int ny = y2 + dy[k];
-        if(inMap(nx, ny) && board[nx][ny] == oppColor) {
-            oppCount++;
-        }
-    }
-    
-    // 综合评分：隔断性权重更高
-    return blockCount * 10 + oppCount * 5;
+    // 计算局面差（走法得分 = 新局面评分）
+    return evaluateBoard(tempBoard, color);
 }
 
 // 第二阶段：从选定的皇后移动生成完整走法，并筛选前K2个
 vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE], 
                                    const vector<QueenMove>& queenMoves, 
                                    int color, int k2) {
-    
     vector<pair<int, Move>> scoredMoves;  // (score, move)
     
     for(const auto& qm : queenMoves) {
@@ -600,7 +601,6 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
         copyBoard(tempBoard, board);
         tempBoard[qm.x0][qm.y0] = 0;
         tempBoard[qm.x1][qm.y1] = color;
-        
         // 生成所有可能的射箭位置
         for(int k = 0; k < 8; k++) {
             for(int delta = 1; delta < GRIDSIZE; delta++) {
@@ -616,11 +616,13 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
                 Move fullMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2);
                 int score = scoreFullMove(board, fullMove, color);
                 
-                scoredMoves.push_back({score, fullMove});
+                if(score > -INF) {
+                    scoredMoves.push_back({score, fullMove});
+                }
             }
         }
+        
     }
-    
     // 按得分降序排序
     sort(scoredMoves.begin(), scoredMoves.end(),
          [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
@@ -637,6 +639,8 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
 
 // 两阶段走法生成主函数
 vector<Move> generateMovesWithTwoPhase(int board[GRIDSIZE][GRIDSIZE], int color) {
+    auto startTime = chrono::high_resolution_clock::now();
+    
     // 第一阶段：生成并筛选皇后移动位置
     vector<QueenMove> topQueenMoves = generateTopQueenMoves(board, color, K1_QUEEN_MOVES);
     if(topQueenMoves.empty()) {
@@ -645,6 +649,10 @@ vector<Move> generateMovesWithTwoPhase(int board[GRIDSIZE][GRIDSIZE], int color)
     
     // 第二阶段：生成并筛选完整走法
     vector<Move> topFullMoves = generateTopFullMoves(board, topQueenMoves, color, K2_FULL_MOVES);
+
+    auto endTime = chrono::high_resolution_clock::now();
+    auto duration = chrono::duration_cast<chrono::microseconds>(endTime - startTime).count();
+    perfStats.totalGenMoveTime += duration / 1000.0;  // 转换为毫秒
     
     return topFullMoves;
 }
@@ -653,7 +661,7 @@ vector<Move> generateMovesWithTwoPhase(int board[GRIDSIZE][GRIDSIZE], int color)
 
 // Alpha-Beta剪枝搜索（带置换表 + 两阶段走法生成）
 int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int beta, 
-                    int color, Move& bestMove, long long hash) {
+                    int color, Move& bestMove, long long hash, double* pSearchTime = nullptr) {
     // 查询置换表
     int ttIndex = (hash & 0x7FFFFFFFFFFFFFFF) % TT_SIZE;
     TTEntry* ttEntry = &transpositionTable[ttIndex];
@@ -710,7 +718,8 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
         newHash ^= zobristBlackTurn;
         
         Move oppBestMove;
-        int score = -alphaBetaSearch(newBoard, depth - 1, -beta, -alpha, -color, oppBestMove, newHash);
+        double oppSearchTime = 0;
+        int score = -alphaBetaSearch(newBoard, depth - 1, -beta, -alpha, -color, oppBestMove, newHash, &oppSearchTime);
         
         if(score > bestScore) {
             bestScore = score;
@@ -744,92 +753,492 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
 
 // 迭代加深搜索
 Move iterativeDeepeningSearch(int color, int maxDepth) {
+    auto startTime = chrono::high_resolution_clock::now();
+    
+    // 重置性能统计
+    perfStats.reset();
+    
+    // initZobrist();
     Move bestMove;
     long long hash = computeHash(gridInfo, color);
     
     // 逐步增加深度
     for(int depth = 1; depth <= maxDepth; depth++) {
         Move currentBestMove;
-        int score = alphaBetaSearch(gridInfo, depth, -INF, INF, color, currentBestMove, hash);
+        double depthSearchTime = 0;
+        int score = alphaBetaSearch(gridInfo, depth, -INF, INF, color, currentBestMove, hash, &depthSearchTime);
         
         if(currentBestMove.x0 >= 0) {
             bestMove = currentBestMove;
         }
+        
+        // 输出调试信息
+        cout << "[Alpha-Beta] Depth " << depth << ": score = " << score << endl;
     }
+    
+    auto endTime = chrono::high_resolution_clock::now();
+    auto duration = chrono::duration_cast<chrono::microseconds>(endTime - startTime).count();
+    perfStats.totalTime = duration / 1000.0;  // 转换为毫秒
+    
+    // 输出详细的性能统计
+    perfStats.printStats();
     
     return bestMove;
 }
 // < -------- Alpha-Beta剪枝结束 --------- >
 
+// ===================== 保存 / 读取 =====================
+void saveGame(){
+    ofstream out("save.txt");
+    out<<currentTurn<<"\n";
+    for(int i=0;i<8;i++){
+        for(int j=0;j<8;j++) out<<gridInfo[i][j]<<" ";
+        out<<"\n";
+    }
+    out.close();
+    cout<<"[Saved]\n";
+}
+
+void loadGame(){
+    ifstream in("save.txt");
+    if(!in.is_open()) {
+        cout<<"[Load failed: file not found]\n";
+        return;
+    }
+    in>>currentTurn;
+    for(int i=0;i<8;i++)
+        for(int j=0;j<8;j++) in>>gridInfo[i][j];
+    in.close();
+    selX=selY=moveX=moveY=-1;
+    validMovePaths.clear();
+    validObstaclePaths.clear();
+    gameStatus = checkGameStatus(gridInfo);  // 检查游戏状态
+    cout<<"[Loaded]\n";
+}
+
+// ===================== AI 移动 =====================
+void aiMove(){
+    if(gameStatus != GAME_ONGOING) return;  // 游戏已结束，不再移动
+    // 清除用户的选择状态（防止在AI走棋时用户有未完成的选择）
+    selX=selY=moveX=moveY=-1;
+    validMovePaths.clear();
+    validObstaclePaths.clear();
+
+    // 根据人类颜色设置AI颜色
+    int aiColor = humanIsBlack ? grid_white : grid_black;
+
+    // 使用 Alpha-Beta 剪枝算法进行决策
+    Move bestMove = iterativeDeepeningSearch(aiColor, searchDepth);
+    cout<<"AI selected move: ("<<bestMove.x0<<","<<bestMove.y0<<") -> ("
+        <<bestMove.x1<<","<<bestMove.y1<<") with obstacle at ("
+        <<bestMove.x2<<","<<bestMove.y2<<")\n";
+    if(bestMove.x0 >= 0) {
+        ProcStepOnBoard(gridInfo, bestMove.x0, bestMove.y0, bestMove.x1, bestMove.y1,
+                       bestMove.x2, bestMove.y2, currentTurn);
+        currentTurn = -currentTurn;
+        gameStatus = checkGameStatus(gridInfo);  // 检查游戏状态
+    }
+    cout<<"AI move done\n";
+}
+
 // ===================== 主函数 =====================
 int main(){
     // 初始化Zobrist哈希表
     initZobrist();
-    int x0, y0, x1, y1, x2, y2;
+
+    srand(time(0));
 
 	// 初始化棋盘
-	gridInfo[0][(GRIDSIZE - 1) / 3] = gridInfo[(GRIDSIZE - 1) / 3][0]
-		= gridInfo[GRIDSIZE - 1 - ((GRIDSIZE - 1) / 3)][0]
-		= gridInfo[GRIDSIZE - 1][(GRIDSIZE - 1) / 3] = grid_black;
-	gridInfo[0][GRIDSIZE - 1 - ((GRIDSIZE - 1) / 3)] = gridInfo[(GRIDSIZE - 1) / 3][GRIDSIZE - 1]
-		= gridInfo[GRIDSIZE - 1 - ((GRIDSIZE - 1) / 3)][GRIDSIZE - 1]
-		= gridInfo[GRIDSIZE - 1][GRIDSIZE - 1 - ((GRIDSIZE - 1) / 3)] = grid_white;
+    gridInfo[0][2]=gridInfo[2][0]=gridInfo[5][0]=gridInfo[7][2]=grid_black;
+    gridInfo[0][5]=gridInfo[2][7]=gridInfo[5][7]=gridInfo[7][5]=grid_white;
+    gameStatus = GAME_ONGOING;
+    needAIMove = false;
 
+    sf::RenderWindow win(sf::VideoMode(640,820),"Amazon Chess");
+    sf::Font font;
+    bool fontLoaded = false;
 
-	int turnID;
-	cin >> turnID;
+    // 尝试多个可能的字体路径
+    const char* fontPaths[] = {
+        "arial.ttf",                                    // Current directory
+        "C:/Windows/Fonts/arial.ttf",                   // Windows system fonts directory (lowercase)
+        "C:/Windows/Fonts/Arial.ttf",                  // Windows system fonts directory (uppercase)
+        "C:/Windows/Fonts/msyh.ttc",                   // Microsoft YaHei (fallback if Arial unavailable)
+        "C:/Windows/Fonts/simsun.ttc",                 // SimSun (fallback if Arial unavailable)
+        "C:/Windows/Fonts/calibri.ttf"                 // Calibri (fallback if Arial unavailable)
+    };
 
-	// 读入到当前回合为止，自己和对手的所有行动，从而把局面恢复到当前回合
-	currBotColor = grid_white; // 先假设自己是白方
-	for (int i = 0; i < turnID; i++)
-	{
-		// 根据这些输入输出逐渐恢复状态到当前回合
+    for(int i = 0; i < sizeof(fontPaths)/sizeof(fontPaths[0]); i++) {
+        fontLoaded = font.loadFromFile(fontPaths[i]);
+        if(fontLoaded) {
+            cout << "[Font loaded: " << fontPaths[i] << "]\n";
+            break;
+        }
+    }
 
-		// 首先是对手行动
-		cin >> x0 >> y0 >> x1 >> y1 >> x2 >> y2;
-		if (x0 == -1)
-			currBotColor = grid_black; // 第一回合收到坐标是-1, -1，说明我是黑方
-		else
-			// ProcStep(x0, y0, x1, y1, x2, y2, -currBotColor, false); // 模拟对方落子
-			ProcStepOnBoard(gridInfo,x0, y0, x1, y1, x2, y2, -currBotColor); // 模拟对方落子
+    if(!fontLoaded) {
+        cout << "[Warning: Could not load any font file, text may not display]\n";
+        cout << "[Please place arial.ttf in the program directory or ensure system fonts are accessible]\n";
+    }
 
-																	// 然后是自己当时的行动
-																	// 对手行动总比自己行动多一个
-		if (i < turnID - 1)
-		{
-			cin >> x0 >> y0 >> x1 >> y1 >> x2 >> y2;
-			if (x0 >= 0)
-				// ProcStep(x0, y0, x1, y1, x2, y2, currBotColor, false); // 模拟己方落子
-				ProcStepOnBoard(gridInfo, x0, y0, x1, y1, x2, y2, currBotColor); // 模拟己方落子
-		}
-	}
+    // 创建说明文本和得分显示
+    vector<sf::Text> helpTexts;
+    sf::Text blackScoreText, whiteScoreText, gameStatusText;
+    if(fontLoaded) {
+        vector<string> helpStrings = {
+            "Controls:",
+            "S - Save game",
+            "L - Load game",
+            "A - Manual AI move",
+            "C - Switch human color",
+            "R - Reset game"
+        };
 
-	// 做出决策（你只需修改以下部分）
+        for(size_t i = 0; i < helpStrings.size(); i++) {
+            sf::Text text;
+            text.setFont(font);
+            text.setString(helpStrings[i]);
+            text.setCharacterSize(14);
+            text.setFillColor(sf::Color::Black);
+            text.setPosition(10, 640 + i * 18);
+            helpTexts.push_back(text);
+        }
 
-	// 使用Alpha-Beta剪枝选择最优走法
-	srand(time(0));
-	Move bestMove = iterativeDeepeningSearch(currBotColor, searchDepth); // 使用迭代加深的Alpha-Beta搜索
-	
-	int startX, startY, resultX, resultY, obstacleX, obstacleY;
-	if (bestMove.x0 >= 0) {
-		startX = bestMove.x0;
-		startY = bestMove.y0;
-		resultX = bestMove.x1;
-		resultY = bestMove.y1;
-		obstacleX = bestMove.x2;
-		obstacleY = bestMove.y2;
-	}
-	else
-	{
-		startX = -1;
-		startY = -1;
-		resultX = -1;
-		resultY = -1;
-		obstacleX = -1;
-		obstacleY = -1;
-	}
+        // 得分显示
+        blackScoreText.setFont(font);
+        blackScoreText.setCharacterSize(16);
+        blackScoreText.setFillColor(sf::Color::Black);
+        blackScoreText.setPosition(350, 640);
 
-	// 决策结束，输出结果（你只需修改以上部分）
-	cout << startX << ' ' << startY << ' ' << resultX << ' ' << resultY << ' ' << obstacleX << ' ' << obstacleY << endl;
+        whiteScoreText.setFont(font);
+        whiteScoreText.setCharacterSize(16);
+        whiteScoreText.setFillColor(sf::Color::Black);
+        whiteScoreText.setPosition(350, 660);
+
+        gameStatusText.setFont(font);
+        gameStatusText.setCharacterSize(18);
+        gameStatusText.setFillColor(sf::Color::Red);
+        gameStatusText.setPosition(350, 680);
+    }
+
+    while(win.isOpen()){
+        sf::Event e;
+        while(win.pollEvent(e)){
+            if(e.type==sf::Event::Closed) win.close();
+
+            if(e.type==sf::Event::KeyPressed){
+                if(e.key.code==sf::Keyboard::S) saveGame();
+                if(e.key.code==sf::Keyboard::L) loadGame();
+                if(e.key.code==sf::Keyboard::A) {
+                    // 清除用户的选择状态
+                    selX=selY=moveX=moveY=-1;
+                    validMovePaths.clear();
+                    validObstaclePaths.clear();
+                    // 检查是否是AI的回合
+                    bool isAITurn = (humanIsBlack && currentTurn == grid_white) ||
+                                   (!humanIsBlack && currentTurn == grid_black);
+                    if(isAITurn && gameStatus == GAME_ONGOING) {
+                        aiMove();
+
+                    }
+                }
+                if(e.key.code==sf::Keyboard::C) {
+                    humanIsBlack=!humanIsBlack;
+                    selX=selY=moveX=moveY=-1;
+                    validMovePaths.clear();
+                    validObstaclePaths.clear();
+                }
+                if(e.key.code==sf::Keyboard::R){
+                    memset(gridInfo,0,sizeof(gridInfo));
+                    gridInfo[0][2]=gridInfo[2][0]=gridInfo[5][0]=gridInfo[7][2]=grid_black;
+                    gridInfo[0][5]=gridInfo[2][7]=gridInfo[5][7]=gridInfo[7][5]=grid_white;
+                    currentTurn = grid_black;
+                    gameStatus = GAME_ONGOING;
+                    needAIMove = false;
+                    selX=selY=moveX=moveY=-1;
+                    validMovePaths.clear();
+                    validObstaclePaths.clear();
+                }
+            }
+
+            if(e.type==sf::Event::MouseButtonPressed){
+                int x=e.mouseButton.x/CELL;
+                int y=e.mouseButton.y/CELL;
+                if(!inMap(x,y)) continue;
+
+                // 检查是否是人类的回合
+                bool isHumanTurn = (humanIsBlack && currentTurn == grid_black) ||
+                                  (!humanIsBlack && currentTurn == grid_white);
+
+                if(!isHumanTurn) continue;
+                if(gameStatus != GAME_ONGOING) continue;  // 游戏已结束，不允许操作
+
+                // 第一步：选择棋子
+                if(selX==-1 && gridInfo[x][y]==currentTurn){
+                    selX=x; selY=y;
+                    moveX=moveY=-1;
+                    validMovePaths = getValidMovePaths(gridInfo, selX, selY);
+                    validObstaclePaths.clear();
+                }
+                // 第二步：点击路径上的点确认移动目标
+                else if(selX!=-1 && moveX==-1){
+                    // 检查是否点击了某个可移动路径上的点
+                    Path* clickedPath = nullptr;
+                    for(auto& path : validMovePaths) {
+                        if(path.contains(x, y)) {
+                            clickedPath = &path;
+                            break;
+                        }
+                    }
+                    if(clickedPath && clickedPath->points.size() > 1) {
+                        // 找到路径的终点（最后一个点）
+                        auto& lastPoint = clickedPath->points.back();
+                        moveX = lastPoint.first;
+                        moveY = lastPoint.second;
+                        // 创建临时棋盘，模拟移动后的状态（原位置变空，新位置有棋子）
+                        int tempBoard[GRIDSIZE][GRIDSIZE];
+                        copyBoard(tempBoard, gridInfo);
+                        tempBoard[selX][selY] = 0;  // 原位置变空
+                        tempBoard[moveX][moveY] = currentTurn;  // 新位置有棋子
+                        // 计算可以放置障碍的路径（从移动后的位置发射，也可以放回原位置）
+                        validObstaclePaths = getValidObstaclePaths(tempBoard, moveX, moveY, selX, selY);
+                    } else if(gridInfo[x][y]==currentTurn) {
+                        // 如果点击了另一个自己的棋子，重新选择
+                        selX=x; selY=y;
+                        moveX=moveY=-1;
+                        validMovePaths = getValidMovePaths(gridInfo, selX, selY);
+                        validObstaclePaths.clear();
+                    } else {
+                        // 点击了无效位置，取消选择
+                        selX=selY=moveX=moveY=-1;
+                        validMovePaths.clear();
+                        validObstaclePaths.clear();
+                    }
+                }
+                // 第三步：点击障碍路径上的点完成走棋
+                else if(selX!=-1 && moveX!=-1){
+                    // 检查是否点击了某个可放置障碍路径上的点
+                    Path* clickedPath = nullptr;
+                    for(auto& path : validObstaclePaths) {
+                        if(path.contains(x, y)) {
+                            clickedPath = &path;
+                            break;
+                        }
+                    }
+                    if(clickedPath && clickedPath->points.size() > 1) {
+                        // 找到路径的终点（最后一个点）
+                        auto& lastPoint = clickedPath->points.back();
+                        int obstacleX = lastPoint.first;
+                        int obstacleY = lastPoint.second;
+                        // 验证完整走法是否合法
+                        if(ProcStepOnBoard(gridInfo, selX, selY, moveX, moveY, obstacleX, obstacleY, currentTurn)) {
+                            selX=selY=moveX=moveY=-1;
+                            validMovePaths.clear();
+                            validObstaclePaths.clear();
+                            currentTurn=-currentTurn;
+                            gameStatus = checkGameStatus(gridInfo);  // 检查游戏状态
+                            // 人类走完后，如果是AI的回合，设置标志延迟AI走棋（先显示人类走棋的结果）
+                            bool isAITurn = (humanIsBlack && currentTurn == grid_white) ||
+                                           (!humanIsBlack && currentTurn == grid_black);
+                            if(isAITurn && gameStatus == GAME_ONGOING) {
+                                needAIMove = true;  // 设置标志，在主循环中延迟执行
+                            }
+                        } else {
+                            // 如果走法不合法，重置选择
+                            selX=selY=moveX=moveY=-1;
+                            validMovePaths.clear();
+                            validObstaclePaths.clear();
+                        }
+                    } else {
+                        // 点击了无效位置，取消选择
+                        selX=selY=moveX=moveY=-1;
+                        validMovePaths.clear();
+                        validObstaclePaths.clear();
+                    }
+                }
+            }
+        }
+
+        // 如果需要AI走棋，先绘制当前状态（显示人类走棋的结果），然后再让AI走棋
+        if(needAIMove) {
+            // 先绘制一次，显示人类走棋的结果（障碍）
+            win.clear(sf::Color::White);
+            for(int i=0;i<8;i++){
+                for(int j=0;j<8;j++){
+                    sf::RectangleShape cell(sf::Vector2f(CELL-1,CELL-1));
+                    cell.setPosition(i*CELL,j*CELL);
+                    // 国际象棋棋盘配色：浅色格子（米色）和深色格子（深棕色）
+                cell.setFillColor((i+j)%2?sf::Color(181,136,99):sf::Color(240,217,181));
+                    win.draw(cell);
+
+                    if(gridInfo[i][j]!=0){
+                        sf::CircleShape c(CELL/2-5);
+                        c.setPosition(i*CELL+5,j*CELL+5);
+                    if(gridInfo[i][j]==grid_black) c.setFillColor(sf::Color::Black);
+                    else if(gridInfo[i][j]==grid_white) {
+                        // 白色棋子使用深灰色边框，内部浅灰色，以便在浅色格子上也能看清
+                        c.setFillColor(sf::Color(200,200,200));
+                        c.setOutlineThickness(2);
+                        c.setOutlineColor(sf::Color::Black);
+                    }
+                    else c.setFillColor(sf::Color::Red);
+                    win.draw(c);
+                    }
+                }
+            }
+
+            // 绘制说明文本和得分
+            if(fontLoaded) {
+                for(auto& text : helpTexts) {
+                    win.draw(text);
+                }
+
+                double blackScore = getBlackScore(gridInfo);
+                double whiteScore = getWhiteScore(gridInfo);
+                // 格式化得分，保留1位小数
+                char scoreBuf1[50], scoreBuf2[50];
+                sprintf(scoreBuf1, "Black Score: %.1f", blackScore);
+                sprintf(scoreBuf2, "White Score: %.1f", whiteScore);
+                blackScoreText.setString(scoreBuf1);
+                whiteScoreText.setString(scoreBuf2);
+                win.draw(blackScoreText);
+                win.draw(whiteScoreText);
+
+                string statusStr = "Game Ongoing - " + string(currentTurn == grid_black ? "Black's Turn" : "White's Turn");
+                gameStatusText.setString(statusStr);
+                gameStatusText.setFillColor(sf::Color::Black);
+                win.draw(gameStatusText);
+            }
+
+            win.display();  // 先显示人类走棋的结果
+
+            // 然后让AI走棋
+            needAIMove = false;
+            aiMove();
+            // 注意：这里不使用continue，让AI移动的结果在正常的绘制循环中显示
+        }
+
+        // 绘制
+        win.clear(sf::Color::White);
+        for(int i=0;i<8;i++){
+            for(int j=0;j<8;j++){
+                sf::RectangleShape cell(sf::Vector2f(CELL-1,CELL-1));
+                cell.setPosition(i*CELL,j*CELL);
+                // 国际象棋棋盘配色：浅色格子（米色）和深色格子（深棕色）
+                cell.setFillColor((i+j)%2?sf::Color(181,136,99):sf::Color(240,217,181));
+                win.draw(cell);
+
+                if(gridInfo[i][j]!=0){
+                    sf::CircleShape c(CELL/2-5);
+                    c.setPosition(i*CELL+5,j*CELL+5);
+                    if(gridInfo[i][j]==grid_black) c.setFillColor(sf::Color::Black);
+                    else if(gridInfo[i][j]==grid_white) {
+                        // 白色棋子使用深灰色边框，内部浅灰色，以便在浅色格子上也能看清
+                        c.setFillColor(sf::Color(200,200,200));
+                        c.setOutlineThickness(2);
+                        c.setOutlineColor(sf::Color::Black);
+                    }
+                    else c.setFillColor(sf::Color::Red);
+                    win.draw(c);
+                }
+            }
+        }
+
+        // 绘制选中的棋子（绿色高亮）
+        if(selX != -1 && selY != -1) {
+            sf::RectangleShape highlight(sf::Vector2f(CELL-2,CELL-2));
+            highlight.setPosition(selX*CELL+1, selY*CELL+1);
+            highlight.setFillColor(sf::Color(0,255,0,150));
+            win.draw(highlight);
+        }
+
+        // 绘制可移动的路径（蓝色高亮，显示路径上的所有点）
+        if(selX != -1 && selY != -1 && moveX == -1) {
+            for(auto& path : validMovePaths) {
+                for(auto& pos : path.points) {
+                    // 跳过起点（已经用绿色高亮显示了）
+                    if(pos.first == selX && pos.second == selY) continue;
+                    sf::RectangleShape highlight(sf::Vector2f(CELL-2,CELL-2));
+                    highlight.setPosition(pos.first*CELL+1, pos.second*CELL+1);
+                    highlight.setFillColor(sf::Color(0,0,255,120));
+                    win.draw(highlight);
+                }
+            }
+        }
+
+        // 绘制已选择的移动目标路径（深蓝色高亮）
+        if(moveX != -1 && moveY != -1) {
+            // 找到对应的路径并高亮显示
+            for(auto& path : validMovePaths) {
+                if(path.contains(moveX, moveY)) {
+                    for(auto& pos : path.points) {
+                        sf::RectangleShape highlight(sf::Vector2f(CELL-2,CELL-2));
+                        highlight.setPosition(pos.first*CELL+1, pos.second*CELL+1);
+                        highlight.setFillColor(sf::Color(0,0,200,150));
+                        win.draw(highlight);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 绘制可放置障碍的路径（黄色高亮，显示路径上的所有点）
+        if(moveX != -1 && moveY != -1) {
+            for(auto& path : validObstaclePaths) {
+                for(auto& pos : path.points) {
+                    // 跳过起点（移动后的位置）
+                    if(pos.first == moveX && pos.second == moveY) continue;
+                    sf::RectangleShape highlight(sf::Vector2f(CELL-2,CELL-2));
+                    highlight.setPosition(pos.first*CELL+1, pos.second*CELL+1);
+                    highlight.setFillColor(sf::Color(255,255,0,100));
+                    win.draw(highlight);
+                }
+            }
+        }
+
+        // 绘制说明文本（仅在字体加载成功时）
+        if(fontLoaded) {
+            for(auto& text : helpTexts) {
+                win.draw(text);
+            }
+
+            // 更新并绘制得分
+            double blackScore = getBlackScore(gridInfo);
+            double whiteScore = getWhiteScore(gridInfo);
+            // 格式化得分，保留1位小数
+            char scoreBuf1[50], scoreBuf2[50];
+            sprintf(scoreBuf1, "black score: %.1f", blackScore);
+            sprintf(scoreBuf2, "white score: %.1f", whiteScore);
+            blackScoreText.setString(scoreBuf1);
+            whiteScoreText.setString(scoreBuf2);
+            win.draw(blackScoreText);
+            win.draw(whiteScoreText);
+
+            // 更新并绘制游戏状态
+            string statusStr = "";
+            switch(gameStatus) {
+                case GAME_ONGOING:
+                    statusStr = "Game Ongoing - " + string(currentTurn == grid_black ? "Black's Turn" : "White's Turn");
+                    gameStatusText.setFillColor(sf::Color::Black);
+                    break;
+                case BLACK_WIN:
+                    statusStr = "Game Over - Black Wins!";
+                    gameStatusText.setFillColor(sf::Color::Red);
+                    break;
+                case WHITE_WIN:
+                    statusStr = "Game Over - White Wins!";
+                    gameStatusText.setFillColor(sf::Color::Red);
+                    break;
+                case DRAW:
+                    statusStr = "Game Over - Draw!";
+                    gameStatusText.setFillColor(sf::Color::Blue);
+                    break;
+            }
+            gameStatusText.setString(statusStr);
+            win.draw(gameStatusText);
+        }
+
+        win.display();
+    }
 	return 0;
 }
