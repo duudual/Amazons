@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <chrono>
 
 #define GRIDSIZE 8
 #define CELL 80
@@ -37,9 +38,55 @@ int gridInfo[GRIDSIZE][GRIDSIZE] = { 0 }; // 先x后y，记录棋盘状态
 int dx[] = { -1,-1,-1,0,0,1,1,1 };
 int dy[] = { -1,0,1,-1,1,-1,0,1 };
 
-int searchDepth = 3; // Alpha-Beta搜索深度
-int MAX_MOVES_PER_NODE = 20;
+int searchDepth = 2; // Alpha-Beta搜索深度
+const int K1_QUEEN_MOVES = 80;   // 第一阶段保留的皇后移动位置数
+const int K2_FULL_MOVES = 30;    // 第二阶段保留的完整走法数
 const int INF = 1000000000; // 无穷大值
+
+// 性能分析统计
+struct PerfStats {
+    double phase1Time = 0;  // 第一阶段耗时（毫秒）
+    double phase2Time = 0;  // 第二阶段耗时（毫秒）
+    double totalGenMoveTime = 0;  // 总的走法生成耗时
+    double totalSearchTime = 0;  // Alpha-Beta搜索总耗时
+    int phase1Calls = 0;  // 第一阶段调用次数
+    int phase2Calls = 0;  // 第二阶段调用次数
+    
+    void reset() {
+        phase1Time = 0;
+        phase2Time = 0;
+        totalGenMoveTime = 0;
+        totalSearchTime = 0;
+        phase1Calls = 0;
+        phase2Calls = 0;
+    }
+    
+    void printStats() const {
+        cout << "\n========== 性能分析统计 ==========\n";
+        cout << "第一阶段（皇后移动筛选）:\n";
+        cout << "  总耗时: " << phase1Time << " ms\n";
+        cout << "  调用次数: " << phase1Calls << "\n";
+        if(phase1Calls > 0) {
+            cout << "  平均耗时: " << phase1Time / phase1Calls << " ms\n";
+        }
+        
+        cout << "第二阶段（完整走法筛选）:\n";
+        cout << "  总耗时: " << phase2Time << " ms\n";
+        cout << "  调用次数: " << phase2Calls << "\n";
+        if(phase2Calls > 0) {
+            cout << "  平均耗时: " << phase2Time / phase2Calls << " ms\n";
+        }
+        
+        cout << "走法生成总耗时: " << totalGenMoveTime << " ms\n";
+        cout << "Alpha-Beta搜索总耗时: " << totalSearchTime << " ms\n";
+        cout << "================================\n";
+    }
+} perfStats;
+
+// 权重参数
+const int WEIGHT_CONNECTIVITY = 10;  // 联通点权重
+const int WEIGHT_MOBILITY = 3;       // 灵活性权重
+const int WEIGHT_CENTER = 1;         // 中心性权重
 
 
 // 路径结构：存储从起点到终点的所有点
@@ -252,289 +299,144 @@ vector<Move> getAllMovesOnBoard(int board[GRIDSIZE][GRIDSIZE], int color) {
 	return moves;
 }
 
-//服务与随机走法
-inline bool pathClear(
-    int board[GRIDSIZE][GRIDSIZE],
-    int x0, int y0,
-    int x1, int y1
-) {
-    int dx = (x1 > x0) - (x1 < x0);
-    int dy = (y1 > y0) - (y1 < y0);
+// < --------- score ------------>
 
-    int x = x0 + dx;
-    int y = y0 + dy;
-
-    while (x != x1 || y != y1) {
-        if (!inMap(x, y)) return false;
-        if (board[x][y] != 0) return false;
-        x += dx;
-        y += dy;
-    }
-
-    // 终点本身必须为空
-    return board[x1][y1] == 0;
-}
-
-inline bool pathClear(
-    int board[GRIDSIZE][GRIDSIZE],
-    int x0, int y0,
-    int x1, int y1,
-    int ex, int ey   // 允许经过/落在的例外格
-) {
-    int dx = (x1 > x0) - (x1 < x0);
-    int dy = (y1 > y0) - (y1 < y0);
-
-    int x = x0 + dx;
-    int y = y0 + dy;
-
-    while (x != x1 || y != y1) {
-        if (!inMap(x, y)) return false;
-        if (board[x][y] != 0 && !(x == ex && y == ey))
-            return false;
-        x += dx;
-        y += dy;
-    }
-
-    // 终点检查
-    if (board[x1][y1] != 0 && !(x1 == ex && y1 == ey))
-        return false;
-
-    return true;
-}
-
-// 用于simulate过程中的快速随机
-bool getRandomMoveOnBoard(
-    int board[GRIDSIZE][GRIDSIZE],
-    int color,
-    Move& outMove
-) {
-    vector<pair<int,int>> queens;
-    for (int i = 0; i < GRIDSIZE; ++i)
-        for (int j = 0; j < GRIDSIZE; ++j)
-            if (board[i][j] == color)
-                queens.emplace_back(i, j);
-
-    if (queens.empty()) return false;
-
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        auto [x0, y0] = queens[rand() % queens.size()];
-        int dir1 = rand() % 8;
-
-        int step1 = rand() % GRIDSIZE + 1;
-        int x1 = x0 + dx[dir1] * step1;
-        int y1 = y0 + dy[dir1] * step1;
-
-        if (!inMap(x1, y1)) continue;
-        if (!pathClear(board, x0, y0, x1, y1)) continue;
-
-        int dir2 = rand() % 8;
-        int step2 = rand() % GRIDSIZE + 1;
-        int x2 = x1 + dx[dir2] * step2;
-        int y2 = y1 + dy[dir2] * step2;
-
-        if (!inMap(x2, y2)) continue;
-        if (!pathClear(board, x1, y1, x2, y2, x0, y0)) continue;
-
-        outMove = Move(x0, y0, x1, y1, x2, y2);
-        return true;
-    }
-    return false;
-}
-
-
-// 占地记录
-int blackDist[GRIDSIZE][GRIDSIZE];
-int whiteDist[GRIDSIZE][GRIDSIZE];
-
-// bfs计算从特定颜色棋子出发，到达全图的最短步数
-void bfsTerritory(int board[GRIDSIZE][GRIDSIZE], int color, int distMap[GRIDSIZE][GRIDSIZE]) {
-    for(int i=0; i<GRIDSIZE; i++) 
-        for(int j=0; j<GRIDSIZE; j++) 
-            distMap[i][j] = 9999;
-
-    queue<pair<int, int>> q;
-    
-    for(int i=0; i<GRIDSIZE; i++) {
-        for(int j=0; j<GRIDSIZE; j++) {
-            if(board[i][j] == color) {
-                distMap[i][j] = 0;
-                q.push({i, j});
-            }
-        }
-    }
-
-    while(!q.empty()) {
-        auto [cx, cy] = q.front();
-        q.pop();
-
-        for(int k=0; k<8; k++) {
-            int nx = cx + dx[k];
-            int ny = cy + dy[k];
-            
-            if(inMap(nx, ny) && board[nx][ny] == 0) {
-                if(distMap[nx][ny] > distMap[cx][cy] + 1) {
-                    distMap[nx][ny] = distMap[cx][cy] + 1;
-                    q.push({nx, ny});
-                }
-            }
-        }
-    }
-}
-
-// 得分 - 快速评估（已弃用，仅保留以供参考）
-double quickScore(int board[GRIDSIZE][GRIDSIZE], int myColor) {
-    bfsTerritory(board, grid_black, blackDist);
-    bfsTerritory(board, grid_white, whiteDist);
-
-    double score = 0;
-    for(int i=0; i<GRIDSIZE; i++) {
-        for(int j=0; j<GRIDSIZE; j++) {
-            if(board[i][j] == 0) {
-                int b = blackDist[i][j];
-                int w = whiteDist[i][j];
-                if(b < w) score -= 1.0; 
-                else if (w < b) score += 1.0; 
-                else if (b!=9999) score += 0.0; 
-            }
-        }
-    }
-    //归一化
-    score /= GRIDSIZE*GRIDSIZE;
-    // 如果是白方(grid_white = -1)，正分好；如果是黑方(1)，负分好
-    if (myColor == grid_white) return score; 
-    else return -score;
-}
-
-// 计算棋子的移动能力（可达位置数量）
-int countMobility(int board[GRIDSIZE][GRIDSIZE], int color) {
+// 计算单个位置的灵活性（周围8个方向可移动的格子数）
+int countPositionMobility(int board[GRIDSIZE][GRIDSIZE], int x, int y) {
     int mobility = 0;
-    for(int i=0; i<GRIDSIZE; i++) {
-        for(int j=0; j<GRIDSIZE; j++) {
-            if(board[i][j] == color) {
-                for(int k=0; k<8; k++) {
-                    for(int delta=1; delta<GRIDSIZE; delta++) {
-                        int nx = i + dx[k] * delta;
-                        int ny = j + dy[k] * delta;
-                        if(!inMap(nx, ny) || board[nx][ny] != 0) break;
-                        mobility++;
-                    }
-                }
-            }
+    for(int k = 0; k < 8; k++) {
+        for(int delta = 1; delta < GRIDSIZE; delta++) {
+            int nx = x + dx[k] * delta;
+            int ny = y + dy[k] * delta;
+            if(!inMap(nx, ny) || board[nx][ny] != 0) break;
+            mobility++;
         }
     }
     return mobility;
 }
 
-// 改进的评估函数
-int evaluateBoard(int board[GRIDSIZE][GRIDSIZE], int myColor) {
-    // 检查终局状态
-    vector<Move> myMoves = getAllMovesOnBoard(board, myColor);
-    vector<Move> oppMoves = getAllMovesOnBoard(board, -myColor);
+// 计算位置的中心性得分（越靠近中心越高）
+int centerScore(int x, int y) {
+    int center = GRIDSIZE / 2;
+    // 到中心的曼哈顿距离，最大为7+7=14，转换为得分（越小越好）
+    int dist = abs(x - center) + abs(y - center);
+    return max(0, 8 - dist);  // 中心为8分，边角为0分
+}
+
+// 计算某方所有Queen的联通区域大小（共享联通区域的Queen只计算一次）
+// 同时累加灵活性和中心性
+struct ColorScore {
+    int connectivity;  // 联通点总数
+    int mobility;      // 灵活性总和
+    int centerBonus;   // 中心性加成
+};
+
+ColorScore calculateColorScore(int board[GRIDSIZE][GRIDSIZE], int color) {
+    ColorScore result = {0, 0, 0};
     
-    if(myMoves.empty() && oppMoves.empty()) {
-        // 双方都无法移动，比较领地
-        bfsTerritory(board, grid_black, blackDist);
-        bfsTerritory(board, grid_white, whiteDist);
-        int myTerritory = 0, oppTerritory = 0;
-        for(int i=0; i<GRIDSIZE; i++) {
-            for(int j=0; j<GRIDSIZE; j++) {
-                if(board[i][j] == 0) {
-                    int myDist = (myColor == grid_black) ? blackDist[i][j] : whiteDist[i][j];
-                    int oppDist = (myColor == grid_black) ? whiteDist[i][j] : blackDist[i][j];
-                    if(myDist < oppDist) myTerritory++;
-                    else if(oppDist < myDist) oppTerritory++;
+    // 找到所有该颜色的Queen位置
+    vector<pair<int,int>> queens;
+    for(int i = 0; i < GRIDSIZE; i++) {
+        for(int j = 0; j < GRIDSIZE; j++) {
+            if(board[i][j] == color) {
+                queens.push_back({i, j});
+                // 累加Queen位置的中心性
+                result.centerBonus += centerScore(i, j);
+            }
+        }
+    }
+    
+    if(queens.empty()) return result;
+    
+    // 使用并查集思想：BFS从所有Queen同时出发，计算联通区域
+    // 已访问标记
+    bool visited[GRIDSIZE][GRIDSIZE] = {false};
+    queue<pair<int,int>> q;
+    
+    // 所有Queen作为起点
+    for(auto& qpos : queens) {
+        visited[qpos.first][qpos.second] = true;
+        q.push(qpos);
+    }
+    
+    while(!q.empty()) {
+        auto [cx, cy] = q.front();
+        q.pop();
+        
+        // 计算该点的灵活性（可移动方向数）
+        int localMobility = 0;
+        
+        for(int k = 0; k < 8; k++) {
+            // 皇后走法：沿着方向一直走
+            for(int delta = 1; delta < GRIDSIZE; delta++) {
+                int nx = cx + dx[k] * delta;
+                int ny = cy + dy[k] * delta;
+                
+                if(!inMap(nx, ny)) break;
+                
+                // 遇到障碍物或对方棋子，停止
+                if(board[nx][ny] == OBSTACLE || board[nx][ny] == -color) break;
+                
+                // 遇到己方Queen，共享联通区域（不重复计算）
+                if(board[nx][ny] == color) break;
+                
+                // 空格，计入联通区域
+                if(!visited[nx][ny]) {
+                    visited[nx][ny] = true;
+                    result.connectivity++;
+                    q.push({nx, ny});
+                }
+                localMobility++;
+            }
+        }
+        
+        result.mobility += localMobility;
+    }
+    
+    return result;
+}
+
+// 新的局面评估函数
+int evaluateBoard(int board[GRIDSIZE][GRIDSIZE], int myColor) {
+    // 快速检查终局：是否有一方无法移动
+    bool myCanMove = false, oppCanMove = false;
+    
+    for(int i = 0; i < GRIDSIZE && (!myCanMove || !oppCanMove); i++) {
+        for(int j = 0; j < GRIDSIZE && (!myCanMove || !oppCanMove); j++) {
+            if(board[i][j] == myColor || board[i][j] == -myColor) {
+                int color = board[i][j];
+                for(int k = 0; k < 8 && !(color == myColor ? myCanMove : oppCanMove); k++) {
+                    int nx = i + dx[k];
+                    int ny = j + dy[k];
+                    if(inMap(nx, ny) && board[nx][ny] == 0) {
+                        if(color == myColor) myCanMove = true;
+                        else oppCanMove = true;
+                    }
                 }
             }
         }
-        if(myTerritory > oppTerritory) return INF - 1;
-        else if(myTerritory < oppTerritory) return -INF + 1;
+    }
+    
+    if(!myCanMove && !oppCanMove) {
+        // 双方都无法移动，比较联通区域
+        ColorScore myScore = calculateColorScore(board, myColor);
+        ColorScore oppScore = calculateColorScore(board, -myColor);
+        if(myScore.connectivity > oppScore.connectivity) return INF - 1;
+        else if(myScore.connectivity < oppScore.connectivity) return -INF + 1;
         else return 0;
     }
     
-    if(myMoves.empty()) return -INF + 1;  // 我方输了
-    if(oppMoves.empty()) return INF - 1;  // 对方输了
+    if(!myCanMove) return -INF + 1;  // 我方输了
+    if(!oppCanMove) return INF - 1;  // 对方输了
     
-    // 计算各项指标
-    bfsTerritory(board, grid_black, blackDist);
-    bfsTerritory(board, grid_white, whiteDist);
+    // 计算双方得分
+    ColorScore myScore = calculateColorScore(board, myColor);
+    ColorScore oppScore = calculateColorScore(board, -myColor);
     
-    int myDist[GRIDSIZE][GRIDSIZE], oppDist[GRIDSIZE][GRIDSIZE];
-    if(myColor == grid_black) {
-        memcpy(myDist, blackDist, sizeof(blackDist));
-        memcpy(oppDist, whiteDist, sizeof(whiteDist));
-    } else {
-        memcpy(myDist, whiteDist, sizeof(whiteDist));
-        memcpy(oppDist, blackDist, sizeof(blackDist));
-    }
-    
-    // 1. 领地控制评分（最重要）
-    int territoryScore = 0;
-    int myCloseTerritory = 0;  // 我方近距离可控区域
-    int oppCloseTerritory = 0; // 对方近距离可控区域
-    
-    for(int i=0; i<GRIDSIZE; i++) {
-        for(int j=0; j<GRIDSIZE; j++) {
-            if(board[i][j] == 0) {
-                int md = myDist[i][j];
-                int od = oppDist[i][j];
-                
-                if(md < od) {
-                    territoryScore += (od - md);  // 差距越大，分数越高
-                    if(md <= 2) myCloseTerritory++;
-                } else if(od < md) {
-                    territoryScore -= (md - od);
-                    if(od <= 2) oppCloseTerritory++;
-                }
-            }
-        }
-    }
-    
-    // 2. 移动能力评分（行动力）
-    int myMobility = countMobility(board, myColor);
-    int oppMobility = countMobility(board, -myColor);
-    int mobilityScore = (myMobility - oppMobility);
-    
-    // 3. 中心控制评分
-    int centerScore = 0;
-    int center = GRIDSIZE / 2;
-    for(int i=0; i<GRIDSIZE; i++) {
-        for(int j=0; j<GRIDSIZE; j++) {
-            if(board[i][j] == 0) {
-                int distToCenter = abs(i - center) + abs(i - center + 1) + 
-                                   abs(j - center) + abs(j - center + 1);
-                int md = myDist[i][j];
-                int od = oppDist[i][j];
-                if(md < od) {
-                    centerScore += max(0, 8 - distToCenter);
-                } else if(od < md) {
-                    centerScore -= max(0, 8 - distToCenter);
-                }
-            }
-        }
-    }
-    
-    // 4. 棋子位置评分（更中心的位置更好）
-    int positionScore = 0;
-    for(int i=0; i<GRIDSIZE; i++) {
-        for(int j=0; j<GRIDSIZE; j++) {
-            if(board[i][j] == myColor) {
-                int distToCenter = abs(i - center) + abs(i - center + 1) + 
-                                   abs(j - center) + abs(j - center + 1);
-                positionScore += (8 - distToCenter);
-            } else if(board[i][j] == -myColor) {
-                int distToCenter = abs(i - center) + abs(i - center + 1) + 
-                                   abs(j - center) + abs(j - center + 1);
-                positionScore -= (8 - distToCenter);
-            }
-        }
-    }
-    
-    // 综合评分（权重调整）
-    int totalScore = territoryScore * 100 + 
-                     mobilityScore * 5 + 
-                     centerScore * 3 +
-                     positionScore * 2 +
-                     (myCloseTerritory - oppCloseTerritory) * 20;
+    // 综合评分：联通点差 * 权重 + 灵活性差 * 权重 + 中心性差 * 权重
+    int totalScore = (myScore.connectivity - oppScore.connectivity) * WEIGHT_CONNECTIVITY
+                   + (myScore.mobility - oppScore.mobility) * WEIGHT_MOBILITY
+                   + (myScore.centerBonus - oppScore.centerBonus) * WEIGHT_CENTER;
     
     return totalScore;
 }
@@ -596,7 +498,6 @@ TTEntry transpositionTable[TT_SIZE];
 // Zobrist哈希值
 long long zobristTable[GRIDSIZE][GRIDSIZE][3]; // [x][y][piece: 0=black, 1=white, 2=obstacle]
 long long zobristBlackTurn;
-initZobrist(); // 全局初始化
 
 // 初始化Zobrist哈希表
 void initZobrist() {
@@ -629,53 +530,177 @@ long long computeHash(int board[GRIDSIZE][GRIDSIZE], int currentPlayer) {
     return hash;
 }
 
-// 对走法进行评分（用于移动排序）
-int scoreMoveHeuristic(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
-    int score = 0;
+// ========== 两阶段走法生成 ==========
+
+// 皇后移动位置结构（第一阶段）
+struct QueenMove {
+    int x0, y0;  // 起始位置
+    int x1, y1;  // 目标位置
+    int score;   // 评分（灵活性 + 中心性）
     
-    // 临时执行走法
+    QueenMove() : x0(-1), y0(-1), x1(-1), y1(-1), score(0) {}
+    QueenMove(int x0_, int y0_, int x1_, int y1_, int s = 0) 
+        : x0(x0_), y0(y0_), x1(x1_), y1(y1_), score(s) {}
+};
+
+// 第一阶段：评估皇后移动位置的得分
+// 评分标准：灵活性（周围可移动格子数）+ 中心性
+int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1, int color) {
+    // 临时移动皇后
     int tempBoard[GRIDSIZE][GRIDSIZE];
     copyBoard(tempBoard, board);
-    ProcStepOnBoard(tempBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color);
+    tempBoard[x0][y0] = 0;
+    tempBoard[x1][y1] = color;
     
-    // 评估移动后的局面
-    score = evaluateBoard(tempBoard, color);
+    // 计算灵活性（从新位置可到达的格子数）
+    int mobility = countPositionMobility(tempBoard, x1, y1);
     
-    // 中心位置加分
-    int center = GRIDSIZE / 2;
-    int distToCenter = abs(move.x1 - center) + abs(move.x1 - center + 1) + 
-                       abs(move.y1 - center) + abs(move.y1 - center + 1);
-    score += (8 - distToCenter) * 10;
+    // 计算中心性
+    int center = centerScore(x1, y1);
     
-    return score;
+    return mobility * 3 + center;  // 灵活性权重更高
 }
 
-// 移动排序
-void orderMoves(int board[GRIDSIZE][GRIDSIZE], vector<Move>& moves, int color) {
-    vector<pair<int, int>> scoredMoves;
+// 第一阶段：生成并筛选前K1个最佳皇后移动位置
+vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color, int k1) {
+    auto startTime = chrono::high_resolution_clock::now();
+    perfStats.phase1Calls++;
     
-    for(int i=0; i<(int)moves.size(); i++) {
-
-        int score = scoreMoveHeuristic(board, moves[i], color);
-        scoredMoves.push_back({score, i});
+    vector<QueenMove> allQueenMoves;
+    
+    // 遍历所有该颜色的皇后
+    for(int i = 0; i < GRIDSIZE; i++) {
+        for(int j = 0; j < GRIDSIZE; j++) {
+            if(board[i][j] != color) continue;
+            
+            // 生成该皇后的所有可能移动位置
+            for(int k = 0; k < 8; k++) {
+                for(int delta = 1; delta < GRIDSIZE; delta++) {
+                    int x1 = i + dx[k] * delta;
+                    int y1 = j + dy[k] * delta;
+                    
+                    if(!inMap(x1, y1) || board[x1][y1] != 0) break;
+                    
+                    // 评估这个移动位置
+                    int score = scoreQueenMove(board, i, j, x1, y1, color);
+                    allQueenMoves.push_back(QueenMove(i, j, x1, y1, score));
+                }
+            }
+        }
     }
     
-    // 按分数降序排序
-    sort(scoredMoves.begin(), scoredMoves.end(), [](const pair<int,int>& a, const pair<int,int>& b) {
-        return a.first > b.first;
-    });
+    // 按得分降序排序
+    sort(allQueenMoves.begin(), allQueenMoves.end(), 
+         [](const QueenMove& a, const QueenMove& b) { return a.score > b.score; });
     
-    // 重新排列moves
-    vector<Move> sortedMoves;
-    for(auto& p : scoredMoves) {
-        sortedMoves.push_back(moves[p.second]);
+    // 只保留前K1个
+    if((int)allQueenMoves.size() > k1) {
+        allQueenMoves.resize(k1);
     }
-    moves = sortedMoves;
+    
+    auto endTime = chrono::high_resolution_clock::now();
+    auto duration = chrono::duration_cast<chrono::microseconds>(endTime - startTime).count();
+    perfStats.phase1Time += duration / 1000.0;  // 转换为毫秒
+    
+    return allQueenMoves;
 }
 
-// Alpha-Beta剪枝搜索（带置换表）
+// 第二阶段：对走法评分（完整走法 = 皇后移动 + 射箭）
+int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
+    // 执行走法
+    int tempBoard[GRIDSIZE][GRIDSIZE];
+    copyBoard(tempBoard, board);
+    if(!ProcStepOnBoard(tempBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color)) {
+        return -INF;  // 无效走法
+    }
+    
+    // 计算局面差（走法得分 = 新局面评分）
+    return evaluateBoard(tempBoard, color);
+}
+
+// 第二阶段：从选定的皇后移动生成完整走法，并筛选前K2个
+vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE], 
+                                   const vector<QueenMove>& queenMoves, 
+                                   int color, int k2) {
+    auto startTime = chrono::high_resolution_clock::now();
+    perfStats.phase2Calls++;
+    
+    vector<pair<int, Move>> scoredMoves;  // (score, move)
+    
+    for(const auto& qm : queenMoves) {
+        // 临时移动皇后
+        int tempBoard[GRIDSIZE][GRIDSIZE];
+        copyBoard(tempBoard, board);
+        tempBoard[qm.x0][qm.y0] = 0;
+        tempBoard[qm.x1][qm.y1] = color;
+        
+        // 生成所有可能的射箭位置
+        for(int k = 0; k < 8; k++) {
+            for(int delta = 1; delta < GRIDSIZE; delta++) {
+                int x2 = qm.x1 + dx[k] * delta;
+                int y2 = qm.y1 + dy[k] * delta;
+                
+                if(!inMap(x2, y2)) break;
+                
+                // 可以射到原位置（已经空了）或空格
+                if(tempBoard[x2][y2] != 0 && !(x2 == qm.x0 && y2 == qm.y0)) break;
+                
+                // 创建完整走法
+                Move fullMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2);
+                int score = scoreFullMove(board, fullMove, color);
+                
+                if(score > -INF) {
+                    scoredMoves.push_back({score, fullMove});
+                }
+            }
+        }
+    }
+    
+    // 按得分降序排序
+    sort(scoredMoves.begin(), scoredMoves.end(),
+         [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
+    
+    // 只保留前K2个
+    vector<Move> result;
+    int count = min(k2, (int)scoredMoves.size());
+    for(int i = 0; i < count; i++) {
+        result.push_back(scoredMoves[i].second);
+    }
+    
+    auto endTime = chrono::high_resolution_clock::now();
+    auto duration = chrono::duration_cast<chrono::microseconds>(endTime - startTime).count();
+    perfStats.phase2Time += duration / 1000.0;  // 转换为毫秒
+    
+    return result;
+}
+
+// 两阶段走法生成主函数
+vector<Move> generateMovesWithTwoPhase(int board[GRIDSIZE][GRIDSIZE], int color) {
+    auto phaseStartTime = chrono::high_resolution_clock::now();
+    
+    // 第一阶段：生成并筛选皇后移动位置
+    vector<QueenMove> topQueenMoves = generateTopQueenMoves(board, color, K1_QUEEN_MOVES);
+    
+    if(topQueenMoves.empty()) {
+        return vector<Move>();  // 无法移动
+    }
+    
+    // 第二阶段：生成并筛选完整走法
+    vector<Move> topFullMoves = generateTopFullMoves(board, topQueenMoves, color, K2_FULL_MOVES);
+    
+    auto phaseEndTime = chrono::high_resolution_clock::now();
+    auto phaseDuration = chrono::duration_cast<chrono::microseconds>(phaseEndTime - phaseStartTime).count();
+    perfStats.totalGenMoveTime += phaseDuration / 1000.0;  // 转换为毫秒
+    
+    return topFullMoves;
+}
+
+// ========== 两阶段走法生成结束 ==========
+
+// Alpha-Beta剪枝搜索（带置换表 + 两阶段走法生成）
 int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int beta, 
-                    int color, Move& bestMove, long long hash) {
+                    int color, Move& bestMove, long long hash, double* pSearchTime = nullptr) {
+    auto searchStartTime = chrono::high_resolution_clock::now();
     // 查询置换表
     int ttIndex = (hash & 0x7FFFFFFFFFFFFFFF) % TT_SIZE;
     TTEntry* ttEntry = &transpositionTable[ttIndex];
@@ -698,8 +723,8 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
     const int alphaOrig = alpha;
     const int betaOrig = beta;
 
-    // 获取所有合法走法
-    vector<Move> moves = getAllMovesOnBoard(board, color);
+    // 使用两阶段走法生成
+    vector<Move> moves = generateMovesWithTwoPhase(board, color);
     
     // 终止条件
     if(depth == 0 || moves.empty()) {
@@ -707,20 +732,15 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
         return score;
     }
     
-    // 移动排序
-    orderMoves(board, moves, color);
-    
     int bestScore = -INF;
     Move localBestMove;
-    int count = 0;
     
     for(const Move& move : moves) {
-        if(count++ >= MAX_MOVES_PER_NODE) break; // 限制每个节点的最大走法数
         // 执行走法
         int newBoard[GRIDSIZE][GRIDSIZE];
         copyBoard(newBoard, board);
         if(!ProcStepOnBoard(newBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color)) {
-            continue; // 防御性检查，理论上不应发生
+            continue; // 防御性检查
         }
         
         // 计算新哈希值
@@ -737,7 +757,8 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
         newHash ^= zobristBlackTurn;
         
         Move oppBestMove;
-        int score = -alphaBetaSearch(newBoard, depth - 1, -beta, -alpha, -color, oppBestMove, newHash);
+        double oppSearchTime = 0;
+        int score = -alphaBetaSearch(newBoard, depth - 1, -beta, -alpha, -color, oppBestMove, newHash, &oppSearchTime);
         
         if(score > bestScore) {
             bestScore = score;
@@ -765,6 +786,14 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
     }
     
     bestMove = localBestMove;
+    
+    auto searchEndTime = chrono::high_resolution_clock::now();
+    auto searchDuration = chrono::duration_cast<chrono::microseconds>(searchEndTime - searchStartTime).count();
+    if(pSearchTime) {
+        *pSearchTime += searchDuration / 1000.0;  // 转换为毫秒
+    }
+    perfStats.totalSearchTime += searchDuration / 1000.0;  // 转换为毫秒
+    
     return bestScore;
 }
 
@@ -847,6 +876,9 @@ void aiMove(){
 
 // ===================== 主函数 =====================
 int main(){
+    // 初始化Zobrist哈希表
+    initZobrist();
+
     srand(time(0));
 
 	// 初始化棋盘
