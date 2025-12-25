@@ -37,9 +37,9 @@ int gridInfo[GRIDSIZE][GRIDSIZE] = { 0 }; // 先x后y，记录棋盘状态
 int dx[] = { -1,-1,-1,0,0,1,1,1 };
 int dy[] = { -1,0,1,-1,1,-1,0,1 };
 
-int maxDepth = 40;//模拟最大深度
-int iterations = 2000;//模拟次数
-double c = 1.414;//探索参数
+int searchDepth = 3; // Alpha-Beta搜索深度
+int MAX_MOVES_PER_NODE = 20;
+const int INF = 1000000000; // 无穷大值
 
 
 // 路径结构：存储从起点到终点的所有点
@@ -227,7 +227,7 @@ vector<Move> getAllMovesOnBoard(int board[GRIDSIZE][GRIDSIZE], int color) {
 				for (int delta1 = 1; delta1 < GRIDSIZE; delta1++) {
 					int xx = i + dx[k] * delta1;
 					int yy = j + dy[k] * delta1;
-					if (board[xx][yy] != 0 || !inMap(xx, yy))
+                    if (!inMap(xx, yy) || board[xx][yy] != 0)
 						break;
 					for (int l = 0; l < 8; ++l) {
 						for (int delta2 = 1; delta2 < GRIDSIZE; delta2++) {
@@ -381,7 +381,7 @@ void bfsTerritory(int board[GRIDSIZE][GRIDSIZE], int color, int distMap[GRIDSIZE
     }
 }
 
-// 得分
+// 得分 - 快速评估（已弃用，仅保留以供参考）
 double quickScore(int board[GRIDSIZE][GRIDSIZE], int myColor) {
     bfsTerritory(board, grid_black, blackDist);
     bfsTerritory(board, grid_white, whiteDist);
@@ -405,14 +405,148 @@ double quickScore(int board[GRIDSIZE][GRIDSIZE], int myColor) {
     else return -score;
 }
 
+// 计算棋子的移动能力（可达位置数量）
+int countMobility(int board[GRIDSIZE][GRIDSIZE], int color) {
+    int mobility = 0;
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            if(board[i][j] == color) {
+                for(int k=0; k<8; k++) {
+                    for(int delta=1; delta<GRIDSIZE; delta++) {
+                        int nx = i + dx[k] * delta;
+                        int ny = j + dy[k] * delta;
+                        if(!inMap(nx, ny) || board[nx][ny] != 0) break;
+                        mobility++;
+                    }
+                }
+            }
+        }
+    }
+    return mobility;
+}
+
+// 改进的评估函数
+int evaluateBoard(int board[GRIDSIZE][GRIDSIZE], int myColor) {
+    // 检查终局状态
+    vector<Move> myMoves = getAllMovesOnBoard(board, myColor);
+    vector<Move> oppMoves = getAllMovesOnBoard(board, -myColor);
+    
+    if(myMoves.empty() && oppMoves.empty()) {
+        // 双方都无法移动，比较领地
+        bfsTerritory(board, grid_black, blackDist);
+        bfsTerritory(board, grid_white, whiteDist);
+        int myTerritory = 0, oppTerritory = 0;
+        for(int i=0; i<GRIDSIZE; i++) {
+            for(int j=0; j<GRIDSIZE; j++) {
+                if(board[i][j] == 0) {
+                    int myDist = (myColor == grid_black) ? blackDist[i][j] : whiteDist[i][j];
+                    int oppDist = (myColor == grid_black) ? whiteDist[i][j] : blackDist[i][j];
+                    if(myDist < oppDist) myTerritory++;
+                    else if(oppDist < myDist) oppTerritory++;
+                }
+            }
+        }
+        if(myTerritory > oppTerritory) return INF - 1;
+        else if(myTerritory < oppTerritory) return -INF + 1;
+        else return 0;
+    }
+    
+    if(myMoves.empty()) return -INF + 1;  // 我方输了
+    if(oppMoves.empty()) return INF - 1;  // 对方输了
+    
+    // 计算各项指标
+    bfsTerritory(board, grid_black, blackDist);
+    bfsTerritory(board, grid_white, whiteDist);
+    
+    int myDist[GRIDSIZE][GRIDSIZE], oppDist[GRIDSIZE][GRIDSIZE];
+    if(myColor == grid_black) {
+        memcpy(myDist, blackDist, sizeof(blackDist));
+        memcpy(oppDist, whiteDist, sizeof(whiteDist));
+    } else {
+        memcpy(myDist, whiteDist, sizeof(whiteDist));
+        memcpy(oppDist, blackDist, sizeof(blackDist));
+    }
+    
+    // 1. 领地控制评分（最重要）
+    int territoryScore = 0;
+    int myCloseTerritory = 0;  // 我方近距离可控区域
+    int oppCloseTerritory = 0; // 对方近距离可控区域
+    
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            if(board[i][j] == 0) {
+                int md = myDist[i][j];
+                int od = oppDist[i][j];
+                
+                if(md < od) {
+                    territoryScore += (od - md);  // 差距越大，分数越高
+                    if(md <= 2) myCloseTerritory++;
+                } else if(od < md) {
+                    territoryScore -= (md - od);
+                    if(od <= 2) oppCloseTerritory++;
+                }
+            }
+        }
+    }
+    
+    // 2. 移动能力评分（行动力）
+    int myMobility = countMobility(board, myColor);
+    int oppMobility = countMobility(board, -myColor);
+    int mobilityScore = (myMobility - oppMobility);
+    
+    // 3. 中心控制评分
+    int centerScore = 0;
+    int center = GRIDSIZE / 2;
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            if(board[i][j] == 0) {
+                int distToCenter = abs(i - center) + abs(i - center + 1) + 
+                                   abs(j - center) + abs(j - center + 1);
+                int md = myDist[i][j];
+                int od = oppDist[i][j];
+                if(md < od) {
+                    centerScore += max(0, 8 - distToCenter);
+                } else if(od < md) {
+                    centerScore -= max(0, 8 - distToCenter);
+                }
+            }
+        }
+    }
+    
+    // 4. 棋子位置评分（更中心的位置更好）
+    int positionScore = 0;
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            if(board[i][j] == myColor) {
+                int distToCenter = abs(i - center) + abs(i - center + 1) + 
+                                   abs(j - center) + abs(j - center + 1);
+                positionScore += (8 - distToCenter);
+            } else if(board[i][j] == -myColor) {
+                int distToCenter = abs(i - center) + abs(i - center + 1) + 
+                                   abs(j - center) + abs(j - center + 1);
+                positionScore -= (8 - distToCenter);
+            }
+        }
+    }
+    
+    // 综合评分（权重调整）
+    int totalScore = territoryScore * 100 + 
+                     mobilityScore * 5 + 
+                     centerScore * 3 +
+                     positionScore * 2 +
+                     (myCloseTerritory - oppCloseTerritory) * 20;
+    
+    return totalScore;
+}
+
 // 计算黑方得分（从黑方视角）
 double getBlackScore(int board[GRIDSIZE][GRIDSIZE]) {
-    return quickScore(board, grid_black);
+    return evaluateBoard(board, grid_black);
 }
 
 // 计算白方得分（从白方视角）
 double getWhiteScore(int board[GRIDSIZE][GRIDSIZE]) {
-    return quickScore(board, grid_white);
+    return evaluateBoard(board, grid_white);
 }
 
 
@@ -443,259 +577,219 @@ GameStatus checkGameStatus(int board[GRIDSIZE][GRIDSIZE]) {
     return GAME_ONGOING;
 }
 
-// < -------- MCTS --------- >//
-struct MCTSNode {
-    Move move;                    // 该节点对应的走法
-    double mcScore;               // mcScore
-    int visits;                   // 访问次数
-    vector<MCTSNode*> children;   // 已扩展的子节点列表
-    vector<Move> untriedMoves;    // 还未尝试的走法（性能关键）
-    MCTSNode* parent;             // 父节点指针
-    int board[GRIDSIZE][GRIDSIZE]; // 当前节点的棋盘状态
-    int currentPlayer;            // 当前玩家颜色
+// < -------- Alpha-Beta剪枝 --------- >
 
-    MCTSNode(Move m, int boardState[GRIDSIZE][GRIDSIZE], int player, MCTSNode* p = nullptr)
-        : move(m), mcScore(0), visits(0), parent(p), currentPlayer(player) {
-        copyBoard(board, boardState);
-        // 初始化未尝试的走法
-        untriedMoves = getAllMovesOnBoard(board, player);  
-    }
-
-    MCTSNode(int boardState[GRIDSIZE][GRIDSIZE], int player)
-        : move(), mcScore(0), visits(0), parent(nullptr), currentPlayer(player) {
-        copyBoard(board, boardState);
-        // 初始化未尝试的走法
-        untriedMoves = getAllMovesOnBoard(board, player);
-    }
-
-    ~MCTSNode() {
-        for (auto child : children) {
-            delete child;
-        }
-    }
-
-    // 检查是否为完全展开的节点（所有动作都已尝试）
-    bool isFullyExpanded() const {
-        return untriedMoves.empty();
-    }
-
-    // 获取UCT值
-    double getUCTValue(double c = 1.414) const {  // c是探索参数，通常用sqrt(2)
-        if (visits == 0) return numeric_limits<double>::max();  // 未访问过的节点优先级最高
-
-        double exploitation = mcScore / visits;
-        double exploration = c * sqrt(log(parent->visits) / visits);
-        return exploitation + exploration;
-    }
-
-    // 选择最优的子节点（UCT最高）
-    MCTSNode* bestUCTChild(double c = 1.414) const {
-        MCTSNode* best = nullptr;
-        double bestValue = -numeric_limits<double>::max();
-        
-        for (MCTSNode* child : children) {
-            double uctValue = child->getUCTValue(c);
-            if (uctValue > bestValue) {
-                bestValue = uctValue;
-                best = child;
-            }
-        }
-        return best;
-    }
+// 置换表结构
+struct TTEntry {
+    long long hash;
+    int depth;
+    int score;
+    int flag; // 0: EXACT, 1: LOWERBOUND, 2: UPPERBOUND
+    Move bestMove;
+    
+    TTEntry() : hash(0), depth(-1), score(0), flag(0), bestMove() {}
 };
 
-// MCTS树重用相关
-MCTSNode* lastMCTSRoot = nullptr;  // 上一次MCTS搜索的根节点
-Move lastAIMove;  // 上一次AI的走法
-Move lastHumanMove;  // 上一次人类的走法
-bool hasValidMCTSRoot = false;  // 是否有有效的树可以重用
+const int TT_SIZE = 1048576; // 2^20 entries
+TTEntry transpositionTable[TT_SIZE];
 
-// 选择阶段：使用UCT算法从根节点选择到叶节点
-MCTSNode* selectNode(MCTSNode* root, double c = 1.414) {
-    MCTSNode* current = root;
+// Zobrist哈希值
+long long zobristTable[GRIDSIZE][GRIDSIZE][3]; // [x][y][piece: 0=black, 1=white, 2=obstacle]
+long long zobristBlackTurn;
+initZobrist(); // 全局初始化
 
-    // 只有在完全展开且有子节点时才继续下降
-    while (current->isFullyExpanded() && !current->children.empty()) {
-        current = current->bestUCTChild(c);
-    }
-
-    return current;
-}
-
-// 扩展阶段：为叶节点添加一个子节点
-MCTSNode* expandNode(MCTSNode* node) {
-    // 如果没有未尝试的走法，返回该节点
-    if (node->untriedMoves.empty()) {
-        return node;
-    }
-
-    // 从未尝试的走法中弹出一个
-    Move selectedMove = node->untriedMoves.back();
-    node->untriedMoves.pop_back();
-
-    // 创建新节点
-    int newBoard[GRIDSIZE][GRIDSIZE];
-    copyBoard(newBoard, node->board);
-    ProcStepOnBoard(newBoard, selectedMove.x0, selectedMove.y0,
-                   selectedMove.x1, selectedMove.y1,
-                   selectedMove.x2, selectedMove.y2, node->currentPlayer);
-
-    MCTSNode* newNode = new MCTSNode(selectedMove, newBoard, -node->currentPlayer, node);
-    node->children.push_back(newNode);
-
-    return newNode;
-}
-
-// 模拟阶段：从指定节点开始随机模拟直到终局
-double simulateGame(MCTSNode* node,int maxDepth) {
-    int simBoard[GRIDSIZE][GRIDSIZE];
-    copyBoard(simBoard, node->board);
-    int currentPlayer = node->currentPlayer;
-
-    // 限制模拟的最大步数，避免无限循环
-    int steps = 0;
-
-    while (steps < maxDepth) {
-        // 检查游戏是否结束
-        GameStatus status = checkGameStatus(simBoard);
-        if (status != GAME_ONGOING) {
-            // 返回结果：从根玩家的视角来看
-            if (status == BLACK_WIN) {
-                return (node->parent->currentPlayer == grid_black) ? 1.0 : 0.0;
-            } else if (status == WHITE_WIN) {
-                return (node->parent->currentPlayer == grid_white) ? 1.0 : 0.0;
-            } else { // DRAW
-                return 0.5;
+// 初始化Zobrist哈希表
+void initZobrist() {
+    srand(20251225); // 固定种子以保证一致性
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            for(int k=0; k<3; k++) {
+                zobristTable[i][j][k] = ((long long)rand() << 32) | rand();
             }
         }
-
-        Move m;
-        if (!getRandomMoveOnBoard(simBoard, currentPlayer, m)) break;
-        // 执行走法
-        ProcStepOnBoard(simBoard, m.x0, m.y0,
-                       m.x1, m.y1,
-                       m.x2, m.y2, currentPlayer);
-        // 切换玩家
-        currentPlayer = -currentPlayer;
-        steps++;
     }
-
-    // 达到最大步数，使用启发式评分
-    // 从当前玩家的视角评估局面
-    double score = quickScore(simBoard, currentPlayer);
-    return (score > 0) ? 1.0 : (score < 0) ? 0.0 : 0.5;
+    zobristBlackTurn = ((long long)rand() << 32) | rand();
 }
 
-// 回溯阶段：将模拟结果沿着路径回传
-void backpropagate(MCTSNode* node, double result) {
-    MCTSNode* current = node;
-    while (current != nullptr) {
-        current->visits++;
-        current->mcScore += result;
-
-        result = - result;
-        current = current->parent;
-    }
-}
-
-// 在MCTS树中查找与给定走法对应的子节点
-MCTSNode* findChildByMove(MCTSNode* node, Move move) {
-    if (node == nullptr) return nullptr;
-    for (MCTSNode* child : node->children) {
-        if (child->move.x0 == move.x0 && child->move.y0 == move.y0 &&
-            child->move.x1 == move.x1 && child->move.y1 == move.y1 &&
-            child->move.x2 == move.x2 && child->move.y2 == move.y2) {
-            return child;
+// 计算棋盘的Zobrist哈希值
+long long computeHash(int board[GRIDSIZE][GRIDSIZE], int currentPlayer) {
+    long long hash = 0;
+    for(int i=0; i<GRIDSIZE; i++) {
+        for(int j=0; j<GRIDSIZE; j++) {
+            if(board[i][j] == grid_black) {
+                hash ^= zobristTable[i][j][0];
+            } else if(board[i][j] == grid_white) {
+                hash ^= zobristTable[i][j][1];
+            } else if(board[i][j] == OBSTACLE) {
+                hash ^= zobristTable[i][j][2];
+            }
         }
     }
-    return nullptr;
+    if(currentPlayer == grid_black) hash ^= zobristBlackTurn;
+    return hash;
 }
 
-// 删除节点的所有子节点，除了指定的一个
-void deleteAllChildrenExcept(MCTSNode* node, MCTSNode* keepChild) {
-    for (MCTSNode* child : node->children) {
-        if (child != keepChild) {
-            delete child;
-        }
-    }
-    node->children.clear();
-    if (keepChild != nullptr) {
-        node->children.push_back(keepChild);
-    }
+// 对走法进行评分（用于移动排序）
+int scoreMoveHeuristic(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
+    int score = 0;
+    
+    // 临时执行走法
+    int tempBoard[GRIDSIZE][GRIDSIZE];
+    copyBoard(tempBoard, board);
+    ProcStepOnBoard(tempBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color);
+    
+    // 评估移动后的局面
+    score = evaluateBoard(tempBoard, color);
+    
+    // 中心位置加分
+    int center = GRIDSIZE / 2;
+    int distToCenter = abs(move.x1 - center) + abs(move.x1 - center + 1) + 
+                       abs(move.y1 - center) + abs(move.y1 - center + 1);
+    score += (8 - distToCenter) * 10;
+    
+    return score;
 }
 
-// 标准蒙特卡洛树搜索主函数
-// 返回pair：(最优走法, 树根节点指针用于重用)
-pair<Move, MCTSNode*> monteCarloSearch(int color, MCTSNode* existingRoot, int iterations, int maxDepth, int c) {
-    MCTSNode* root = existingRoot;
+// 移动排序
+void orderMoves(int board[GRIDSIZE][GRIDSIZE], vector<Move>& moves, int color) {
+    vector<pair<int, int>> scoredMoves;
     
-    if (root == nullptr) {
-        // 没有现存的树，创建新根
-        int rootBoard[GRIDSIZE][GRIDSIZE];
-        copyBoard(rootBoard, gridInfo);
-        root = new MCTSNode(rootBoard, color);
-    }
+    for(int i=0; i<(int)moves.size(); i++) {
 
-    // // 检查是否有合法走法
-    // if (root->untriedMoves.empty() && root->children.empty()) {
-    //     // 没有走法可选
-    //     Move emptyMove(-1, -1, -1, -1, -1, -1);
-    //     return {emptyMove, root};
-    // }
-    
-    // if (root->untriedMoves.size() == 1 && root->children.empty()) {
-    //     // 只有一个走法
-    //     Move onlyMove = root->untriedMoves[0];
-    //     return {onlyMove, root};
-    // }
-
-    // 进行指定次数的MCTS迭代
-    for (int i = 0; i < iterations; i++) {
-        // 1. 选择阶段：从根节点选择到叶节点
-        MCTSNode* selectedNode = selectNode(root, c);
-
-        // 2. 扩展阶段：如果还有未尝试的走法，就扩展；否则继续选择已有的最优子节点
-        MCTSNode* expandedNode = selectedNode;
-        if (!selectedNode->isFullyExpanded()) {
-            // 节点未完全展开，扩展它
-            expandedNode = expandNode(selectedNode);
-        }
-
-        // 3. 模拟阶段：从扩展节点进行随机模拟
-        double simulationResult = simulateGame(expandedNode, maxDepth);
-
-        // 4. 回溯阶段：将结果回传到根节点
-        backpropagate(expandedNode, simulationResult);
-    }
-
-    // 选择平均mcScore最大的走法作为最终决策
-    vector<pair<MCTSNode*, double>> moveStats;
-    for (MCTSNode* child : root->children) {
-        moveStats.push_back({child,child->mcScore / child->visits});
+        int score = scoreMoveHeuristic(board, moves[i], color);
+        scoredMoves.push_back({score, i});
     }
     
-    // 按平均mcScore从高到低排序
-    sort(moveStats.begin(), moveStats.end(), [](const pair<MCTSNode*, double>& a, const pair<MCTSNode*, double>& b) {
-        return a.second > b.second;
+    // 按分数降序排序
+    sort(scoredMoves.begin(), scoredMoves.end(), [](const pair<int,int>& a, const pair<int,int>& b) {
+        return a.first > b.first;
     });
     
-    // 输出前5个走法及其访问次数
-    cout << "\n========== Top 5 Moves ==========\n";
-    int topCount = min(5, (int)moveStats.size());
-    for (int i = 0; i < topCount; i++) {
-        cout << "Move " << (i+1) << ": (" << moveStats[i].first->move.x0 << "," << moveStats[i].first->move.y0 
-             << ") -> (" << moveStats[i].first->move.x1 << "," << moveStats[i].first->move.y1 
-             << ") | Obstacle at (" << moveStats[i].first->move.x2 << "," << moveStats[i].first->move.y2 
-             << ") | Visits: " << moveStats[i].second << "\n";
+    // 重新排列moves
+    vector<Move> sortedMoves;
+    for(auto& p : scoredMoves) {
+        sortedMoves.push_back(moves[p.second]);
     }
-    cout << "================================\n\n";
-    
-    // 选择访问次数最多的走法（第一个）
-    Move bestMove = moveStats[0].first->move;
-
-    return {bestMove, root};
+    moves = sortedMoves;
 }
-// < -------- MCTS --------- >//
+
+// Alpha-Beta剪枝搜索（带置换表）
+int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int beta, 
+                    int color, Move& bestMove, long long hash) {
+    // 查询置换表
+    int ttIndex = (hash & 0x7FFFFFFFFFFFFFFF) % TT_SIZE;
+    TTEntry* ttEntry = &transpositionTable[ttIndex];
+    
+    if(ttEntry->hash == hash && ttEntry->depth >= depth) {
+        if(ttEntry->flag == 0) { // EXACT
+            bestMove = ttEntry->bestMove;
+            return ttEntry->score;
+        } else if(ttEntry->flag == 1) { // LOWERBOUND
+            alpha = max(alpha, ttEntry->score);
+        } else if(ttEntry->flag == 2) { // UPPERBOUND
+            beta = min(beta, ttEntry->score);
+        }
+        if(alpha >= beta) {
+            bestMove = ttEntry->bestMove;
+            return ttEntry->score;
+        }
+    }
+    
+    const int alphaOrig = alpha;
+    const int betaOrig = beta;
+
+    // 获取所有合法走法
+    vector<Move> moves = getAllMovesOnBoard(board, color);
+    
+    // 终止条件
+    if(depth == 0 || moves.empty()) {
+        int score = evaluateBoard(board, color);
+        return score;
+    }
+    
+    // 移动排序
+    orderMoves(board, moves, color);
+    
+    int bestScore = -INF;
+    Move localBestMove;
+    int count = 0;
+    
+    for(const Move& move : moves) {
+        if(count++ >= MAX_MOVES_PER_NODE) break; // 限制每个节点的最大走法数
+        // 执行走法
+        int newBoard[GRIDSIZE][GRIDSIZE];
+        copyBoard(newBoard, board);
+        if(!ProcStepOnBoard(newBoard, move.x0, move.y0, move.x1, move.y1, move.x2, move.y2, color)) {
+            continue; // 防御性检查，理论上不应发生
+        }
+        
+        // 计算新哈希值
+        long long newHash = hash;
+        // 移除旧位置的棋子
+        if(board[move.x0][move.y0] == grid_black) newHash ^= zobristTable[move.x0][move.y0][0];
+        else if(board[move.x0][move.y0] == grid_white) newHash ^= zobristTable[move.x0][move.y0][1];
+        // 添加新位置的棋子
+        if(color == grid_black) newHash ^= zobristTable[move.x1][move.y1][0];
+        else newHash ^= zobristTable[move.x1][move.y1][1];
+        // 添加障碍物
+        newHash ^= zobristTable[move.x2][move.y2][2];
+        // 切换玩家
+        newHash ^= zobristBlackTurn;
+        
+        Move oppBestMove;
+        int score = -alphaBetaSearch(newBoard, depth - 1, -beta, -alpha, -color, oppBestMove, newHash);
+        
+        if(score > bestScore) {
+            bestScore = score;
+            localBestMove = move;
+        }
+        
+        alpha = max(alpha, score);
+        if(alpha >= beta) {
+            break; // Beta剪枝
+        }
+    }
+    
+    // 存储到置换表
+    ttEntry->hash = hash;
+    ttEntry->depth = depth;
+    ttEntry->score = bestScore;
+    ttEntry->bestMove = localBestMove;
+    
+    if(bestScore <= alphaOrig) {
+        ttEntry->flag = 2; // UPPERBOUND
+    } else if(bestScore >= betaOrig) {
+        ttEntry->flag = 1; // LOWERBOUND
+    } else {
+        ttEntry->flag = 0; // EXACT
+    }
+    
+    bestMove = localBestMove;
+    return bestScore;
+}
+
+// 迭代加深搜索
+Move iterativeDeepeningSearch(int color, int maxDepth) {
+    // initZobrist();
+    Move bestMove;
+    long long hash = computeHash(gridInfo, color);
+    
+    // 逐步增加深度
+    for(int depth = 1; depth <= maxDepth; depth++) {
+        Move currentBestMove;
+        int score = alphaBetaSearch(gridInfo, depth, -INF, INF, color, currentBestMove, hash);
+        
+        if(currentBestMove.x0 >= 0) {
+            bestMove = currentBestMove;
+        }
+        
+        // 输出调试信息
+        cout << "[Alpha-Beta] Depth " << depth << ": score = " << score << endl;
+    }
+    
+    return bestMove;
+}
+// < -------- Alpha-Beta剪枝结束 --------- >
 
 // ===================== 保存 / 读取 =====================
 void saveGame(){
@@ -737,63 +831,16 @@ void aiMove(){
     // 根据人类颜色设置AI颜色
     int aiColor = humanIsBlack ? grid_white : grid_black;
 
-    // 尝试重用之前的树
-    MCTSNode* reuseRoot = nullptr;
-    if (hasValidMCTSRoot && lastMCTSRoot != nullptr) {
-        // 在上一次AI的树中查找AI的走法对应的节点
-        MCTSNode* afterAIMove = findChildByMove(lastMCTSRoot, lastAIMove);
-        
-        if (afterAIMove != nullptr) {
-            // 再在这个节点中查找人类的走法对应的节点
-            MCTSNode* afterHumanMove = findChildByMove(afterAIMove, lastHumanMove);
-            
-            if (afterHumanMove != nullptr) {
-                cout << "[Tree Reuse] Found AI->Human move sequence, reusing subtree\n";
-                // 清除树中的其他分支
-                deleteAllChildrenExcept(lastMCTSRoot, afterAIMove);
-                deleteAllChildrenExcept(afterAIMove, afterHumanMove);
-                // 重置树中的连接（afterHumanMove现在成为新的根）
-                afterHumanMove->parent = nullptr;
-                reuseRoot = afterHumanMove;
-            } else {
-                cout << "[Tree Reuse] Human's move not found in tree, creating new tree\n";
-                // 人类的走法没有在树中，删除旧树
-                if (lastMCTSRoot != nullptr) {
-                    delete lastMCTSRoot;
-                    cout << "[Tree Reuse] Deleted old MCTS tree\n";
-                }
-                reuseRoot = nullptr;
-                
-            }
-        } else {
-            cout << "[Tree Reuse] AI's move not found in tree, creating new tree\n";
-            // 找不到AI的走法，删除旧树，创建新树
-            if (lastMCTSRoot != nullptr) delete lastMCTSRoot;
-            reuseRoot = nullptr;
-        }
-    }
-
-    // 使用 MCTS 算法进行决策
-    auto [bestMove, newRoot] = monteCarloSearch(aiColor, reuseRoot, iterations, maxDepth, c);
-    //打印当前的局面的所有走法的个数：
-    vector<Move> allMoves = getAllMovesOnBoard(newRoot->board, aiColor);
-    cout<<"[MCTS] Current board has "<<allMoves.size()<<" possible moves for AI.\n";
-    //打印newRoot:
-    cout<<"[MCTS] New root has "<<newRoot->children.size()<<" children after search.\n";
+    // 使用 Alpha-Beta 剪枝算法进行决策
+    Move bestMove = iterativeDeepeningSearch(aiColor, searchDepth);
+    cout<<"AI selected move: ("<<bestMove.x0<<","<<bestMove.y0<<") -> ("
+        <<bestMove.x1<<","<<bestMove.y1<<") with obstacle at ("
+        <<bestMove.x2<<","<<bestMove.y2<<")\n";
     if(bestMove.x0 >= 0) {
         ProcStepOnBoard(gridInfo, bestMove.x0, bestMove.y0, bestMove.x1, bestMove.y1,
                        bestMove.x2, bestMove.y2, currentTurn);
         currentTurn = -currentTurn;
         gameStatus = checkGameStatus(gridInfo);  // 检查游戏状态
-        
-        // 保存树和走法供下一次重用
-        lastMCTSRoot = newRoot;
-        lastAIMove = bestMove;
-        hasValidMCTSRoot = true;
-    } else {
-        // AI无法走棋，删除树
-        if (newRoot != nullptr) delete newRoot;
-        hasValidMCTSRoot = false;
     }
     cout<<"AI move done\n";
 }
@@ -912,14 +959,6 @@ int main(){
                     selX=selY=moveX=moveY=-1;
                     validMovePaths.clear();
                     validObstaclePaths.clear();
-                    // 清理MCTS树
-                    if (lastMCTSRoot != nullptr) {
-                        delete lastMCTSRoot;
-                        lastMCTSRoot = nullptr;
-                    }
-                    hasValidMCTSRoot = false;
-                    lastAIMove = Move();
-                    lastHumanMove = Move();
                 }
             }
 
@@ -994,9 +1033,6 @@ int main(){
                         int obstacleY = lastPoint.second;
                         // 验证完整走法是否合法
                         if(ProcStepOnBoard(gridInfo, selX, selY, moveX, moveY, obstacleX, obstacleY, currentTurn)) {
-                            // 记录人类的走法（供AI重用树时使用）
-                            lastHumanMove = Move(selX, selY, moveX, moveY, obstacleX, obstacleY);
-                            
                             selX=selY=moveX=moveY=-1;
                             validMovePaths.clear();
                             validObstaclePaths.clear();

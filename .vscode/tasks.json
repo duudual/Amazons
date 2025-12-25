@@ -60,6 +60,86 @@
         },
   
         "problemMatcher": ["$msCompile"]
+      },
+      {
+        "label": "Build AmazonRMC_ui (MSVC + SFML)",
+        "type": "shell",
+  
+        "command": "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat\" && cl /std:c++17 /EHsc AmazonRMC/AmazonRMC_gui.cpp /I D:\\lib\\SFML-2.5.1\\include /link /LIBPATH:D:\\lib\\SFML-2.5.1\\lib sfml-graphics.lib sfml-window.lib sfml-system.lib",
+  
+        "options": {
+          "shell": {
+            "executable": "cmd.exe",
+            "args": ["/d", "/c"]
+          }
+        },
+  
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+  
+        "problemMatcher": ["$msCompile"]
+      },
+      {
+        "label": "Build AmazonRMC (MSVC + SFML)",
+        "type": "shell",
+  
+        "command": "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat\" && cl /std:c++17 /EHsc AmazonRMC/AmazonRMC.cpp /I D:\\lib\\SFML-2.5.1\\include /link /LIBPATH:D:\\lib\\SFML-2.5.1\\lib sfml-graphics.lib sfml-window.lib sfml-system.lib",
+  
+        "options": {
+          "shell": {
+            "executable": "cmd.exe",
+            "args": ["/d", "/c"]
+          }
+        },
+  
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+  
+        "problemMatcher": ["$msCompile"]
+      },
+      {
+        "label": "Build AmazonAlphabeta_gui",
+        "type": "shell",
+  
+        "command": "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat\" && cl /utf-8 /std:c++17 /EHsc AmazonAb/AmazonAlphabeta_gui.cpp /I D:\\lib\\SFML-2.5.1\\include /link /LIBPATH:D:\\lib\\SFML-2.5.1\\lib sfml-graphics.lib sfml-window.lib sfml-system.lib",
+  
+        "options": {
+          "shell": {
+            "executable": "cmd.exe",
+            "args": ["/d", "/c"]
+          }
+        },
+  
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+  
+        "problemMatcher": ["$msCompile"]
+      },
+      {
+        "label": "Build AmazonAlphabeta",
+        "type": "shell",
+  
+        "command": "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat\" && cl /utf-8 /std:c++17 /EHsc AmazonAb/AmazonAlphabeta.cpp /I D:\\lib\\SFML-2.5.1\\include /link /LIBPATH:D:\\lib\\SFML-2.5.1\\lib sfml-graphics.lib sfml-window.lib sfml-system.lib",
+  
+        "options": {
+          "shell": {
+            "executable": "cmd.exe",
+            "args": ["/d", "/c"]
+          }
+        },
+  
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+  
+        "problemMatcher": ["$msCompile"]
       }
     ]
   }
