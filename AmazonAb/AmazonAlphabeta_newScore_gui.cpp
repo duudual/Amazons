@@ -1099,7 +1099,8 @@ int alphaBetaSearch(int board[GRIDSIZE][GRIDSIZE], int depth, int alpha, int bet
     
     // 终止条件
     if(depth == 0 || moves.empty()) {
-        int score = evaluateBoard(board, color);
+        // 根据评估模式选择评估函数
+        int score = (EVAL_MODE == 1) ? evaluateBoardAdvanced(board, color) : evaluateBoard(board, color);
         return score;
     }
     
