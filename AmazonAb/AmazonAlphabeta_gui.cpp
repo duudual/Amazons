@@ -43,6 +43,11 @@ const int K1_QUEEN_MOVES = 80;   // 第一阶段保留的皇后移动位置数
 const int K2_FULL_MOVES = 50;    // 第二阶段保留的完整走法数
 const int INF = 1000000000; // 无穷大值
 
+// 中盘阈值参数
+const int MIDGAME_THRESHOLD = 20;  // 手数阈值，20手以后进入中盘
+const int ENDGAME_DEPTH = 4;       // 中盘及以后的搜索深度
+const int OPENING_DEPTH = 3;       // 开局阶段的搜索深度
+
 // 性能分析统计
 struct PerfStats {
     double totalphase1GenMoveTime = 0; 
@@ -250,6 +255,21 @@ vector<Path> getValidObstaclePaths(int board[GRIDSIZE][GRIDSIZE], int x1, int y1
 		}
 	}
 	return paths;
+}
+
+// 计算当前棋盘的走法手数（已执行的手数）
+int countMovesMade(int board[GRIDSIZE][GRIDSIZE]) {
+    int obstacleCount = 0;
+    // 统计棋盘上的障碍物个数
+    for(int i = 0; i < GRIDSIZE; i++) {
+        for(int j = 0; j < GRIDSIZE; j++) {
+            if(board[i][j] == OBSTACLE) {
+                obstacleCount++;
+            }
+        }
+    }
+    // 每一手走法会放置一个障碍物
+    return obstacleCount;
 }
 
 // 在指定棋盘上获取所有合法走法
@@ -882,8 +902,13 @@ void aiMove(){
     // 根据人类颜色设置AI颜色
     int aiColor = humanIsBlack ? grid_white : grid_black;
 
+    // 根据当前手数动态调整搜索深度
+    int moveCount = countMovesMade(gridInfo);
+    int currentDepth = (moveCount >= MIDGAME_THRESHOLD) ? ENDGAME_DEPTH : OPENING_DEPTH;
+    cout << "[Move count: " << moveCount << ", Search depth: " << currentDepth << "]\n";
+
     // 使用 Alpha-Beta 剪枝算法进行决策
-    Move bestMove = iterativeDeepeningSearch(aiColor, searchDepth);
+    Move bestMove = iterativeDeepeningSearch(aiColor, currentDepth);
     cout<<"AI selected move: ("<<bestMove.x0<<","<<bestMove.y0<<") -> ("
         <<bestMove.x1<<","<<bestMove.y1<<") with obstacle at ("
         <<bestMove.x2<<","<<bestMove.y2<<")\n";

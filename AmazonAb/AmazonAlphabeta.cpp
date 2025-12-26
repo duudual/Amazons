@@ -41,6 +41,11 @@ const int K1_QUEEN_MOVES = 80;   // 第一阶段保留的皇后移动位置数
 const int K2_FULL_MOVES = 50;    // 第二阶段保留的完整走法数
 const int INF = 1000000000; // 无穷大值
 
+// 中盘阈值参数
+const int MIDGAME_THRESHOLD = 35;  // 手数阈值，20手以后进入中盘
+const int ENDGAME_DEPTH = 4;       // 中盘及以后的搜索深度
+const int OPENING_DEPTH = 3;       // 开局阶段的搜索深度
+
 // 权重参数
 const int WEIGHT_CONNECTIVITY = 10;  // 联通点权重
 const int WEIGHT_MOBILITY = 3;       // 灵活性权重
@@ -207,6 +212,21 @@ vector<Path> getValidObstaclePaths(int board[GRIDSIZE][GRIDSIZE], int x1, int y1
 		}
 	}
 	return paths;
+}
+
+// 计算当前棋盘的走法手数（已执行的手数）
+int countMovesMade(int board[GRIDSIZE][GRIDSIZE]) {
+	int obstacleCount = 0;
+	// 统计棋盘上的障碍物个数
+	for(int i = 0; i < GRIDSIZE; i++) {
+		for(int j = 0; j < GRIDSIZE; j++) {
+			if(board[i][j] == OBSTACLE) {
+				obstacleCount++;
+			}
+		}
+	}
+	// 每一手走法会放置一个障碍物
+	return obstacleCount;
 }
 
 // 在指定棋盘上获取所有合法走法
@@ -561,30 +581,24 @@ int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
     // 不需要执行完整走法，只需评估障碍位置
     int x2 = move.x2, y2 = move.y2;
     
-    // 1. 隔断性：统计障碍位置周围8个方向的障碍物/边界个数（越多越好，说明容易形成闭合）
+    // 合并两次邻居扫描，减少访存与分支
     int blockCount = 0;
-    for(int k = 0; k < 8; k++) {
-        int nx = x2 + dx[k];
-        int ny = y2 + dy[k];
-        // 边界或已有障碍物/棋子
-        if(!inMap(nx, ny) || board[nx][ny] == OBSTACLE) {
-            blockCount++;
-        }
-    }
-    
-    // 2. 阻止对手灵活性：统计障碍位置周围一圈的对手棋子个数（越多越好，说明阻挡了对手的移动）
     int oppCount = 0;
-    int oppColor = -color;
+    const int oppColor = -color;
     for(int k = 0; k < 8; k++) {
-        int nx = x2 + dx[k];
-        int ny = y2 + dy[k];
-        if(inMap(nx, ny) && board[nx][ny] == oppColor) {
-            oppCount++;
+        const int nx = x2 + dx[k];
+        const int ny = y2 + dy[k];
+        if(!inMap(nx, ny)) {
+            blockCount++; // 边界
+            continue;
         }
+        const int cell = board[nx][ny];
+        if(cell == OBSTACLE) blockCount++;
+        if(cell == oppColor) oppCount++;
     }
     
     // 综合评分：隔断性权重更高
-    return blockCount * 10 + oppCount * 5;
+    return blockCount * 2 + oppCount * 5;
 }
 
 // 第二阶段：从选定的皇后移动生成完整走法，并筛选前K2个
@@ -593,43 +607,48 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
                                    int color, int k2) {
     
     vector<pair<int, Move>> scoredMoves;  // (score, move)
-    
+    scoredMoves.reserve(queenMoves.size() * 8 * (GRIDSIZE - 1));
+
     for(const auto& qm : queenMoves) {
-        // 临时移动皇后
-        int tempBoard[GRIDSIZE][GRIDSIZE];
-        copyBoard(tempBoard, board);
-        tempBoard[qm.x0][qm.y0] = 0;
-        tempBoard[qm.x1][qm.y1] = color;
-        
+        // 逻辑占用查询：避免为每个皇后复制棋盘
+        auto cellAt = [&](int x, int y) {
+            if(x == qm.x0 && y == qm.y0) return 0;      // 原位置视为空
+            if(x == qm.x1 && y == qm.y1) return color;  // 新位置视为己方
+            return board[x][y];
+        };
+
         // 生成所有可能的射箭位置
         for(int k = 0; k < 8; k++) {
             for(int delta = 1; delta < GRIDSIZE; delta++) {
-                int x2 = qm.x1 + dx[k] * delta;
-                int y2 = qm.y1 + dy[k] * delta;
-                
+                const int x2 = qm.x1 + dx[k] * delta;
+                const int y2 = qm.y1 + dy[k] * delta;
                 if(!inMap(x2, y2)) break;
-                
-                // 可以射到原位置（已经空了）或空格
-                if(tempBoard[x2][y2] != 0 && !(x2 == qm.x0 && y2 == qm.y0)) break;
-                
-                // 创建完整走法
+
+                // 射线遇到非空则终止；原位置已被视为0，无需特判
+                if(cellAt(x2, y2) != 0) break;
+
                 Move fullMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2);
                 int score = scoreFullMove(board, fullMove, color);
-                
                 scoredMoves.push_back({score, fullMove});
             }
         }
     }
-    
-    // 按得分降序排序
+
+    // 仅截取前K2：nth_element + 局部排序，避免全量排序
+    vector<Move> result;
+    if(scoredMoves.empty()) return result;
+
+    if((int)scoredMoves.size() > k2) {
+        nth_element(scoredMoves.begin(), scoredMoves.begin() + k2, scoredMoves.end(),
+                    [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
+        scoredMoves.resize(k2);
+    }
     sort(scoredMoves.begin(), scoredMoves.end(),
          [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
-    
-    // 只保留前K2个
-    vector<Move> result;
-    int count = min(k2, (int)scoredMoves.size());
-    for(int i = 0; i < count; i++) {
-        result.push_back(scoredMoves[i].second);
+
+    result.reserve(scoredMoves.size());
+    for(auto& item : scoredMoves) {
+        result.push_back(item.second);
     }
     
     return result;
@@ -806,9 +825,13 @@ int main(){
 
 	// 做出决策（你只需修改以下部分）
 
+	// 根据当前手数动态调整搜索深度
+	int moveCount = countMovesMade(gridInfo);
+	int currentDepth = (moveCount >= MIDGAME_THRESHOLD) ? ENDGAME_DEPTH : OPENING_DEPTH;
+
 	// 使用Alpha-Beta剪枝选择最优走法
 	srand(time(0));
-	Move bestMove = iterativeDeepeningSearch(currBotColor, searchDepth); // 使用迭代加深的Alpha-Beta搜索
+	Move bestMove = iterativeDeepeningSearch(currBotColor, currentDepth); // 使用迭代加深的Alpha-Beta搜索
 	
 	int startX, startY, resultX, resultY, obstacleX, obstacleY;
 	if (bestMove.x0 >= 0) {
