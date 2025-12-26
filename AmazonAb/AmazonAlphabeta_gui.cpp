@@ -45,18 +45,28 @@ const int INF = 1000000000; // 无穷大值
 
 // 性能分析统计
 struct PerfStats {
-    double totalGenMoveTime = 0;  // move候选两阶段总耗时（毫秒）
+    double totalphase1GenMoveTime = 0; 
+    double totalphase2GenMoveTime = 0; 
+
     double totalTime = 0;  // 这次操作总耗时（毫秒）
+    double evaluateBoardTime = 0; // 评估函数总耗时（毫秒）
+    double evaluateMoveTime = 0;  // 评估走法总耗时（毫秒）
     
     void reset() {
-        totalGenMoveTime = 0;
+        totalphase1GenMoveTime = 0;
+        totalphase2GenMoveTime = 0;
         totalTime = 0;
+        evaluateBoardTime = 0;  
+        evaluateMoveTime = 0;
     }
     
     void printStats() const {
-        cout << "\n========== 时间统计 ==========\n";
-        cout << "Move候选生成时间: " << totalGenMoveTime << " ms\n";
-        cout << "总耗时: " << totalTime << " ms\n";
+        cout << "\n========== time cost ==========\n";
+        cout << "total phase1 " << totalphase1GenMoveTime << " ms\n";
+        cout << "total phase2 " << totalphase2GenMoveTime << " ms\n";
+        cout<<"evaluate Board: "<< evaluateBoardTime << " ms\n";
+        cout<<"evaluate Move: "<< evaluateMoveTime << " ms\n";
+        cout << "total: " << totalTime << " ms\n";
         cout << "================================\n";
     }
 } perfStats;
@@ -377,6 +387,8 @@ ColorScore calculateColorScore(int board[GRIDSIZE][GRIDSIZE], int color) {
 // 新的局面评估函数
 int evaluateBoard(int board[GRIDSIZE][GRIDSIZE], int myColor) {
     // 快速检查终局：是否有一方无法移动
+    auto startTime = chrono::high_resolution_clock::now();
+
     bool myCanMove = false, oppCanMove = false;
     
     for(int i = 0; i < GRIDSIZE && (!myCanMove || !oppCanMove); i++) {
@@ -416,6 +428,9 @@ int evaluateBoard(int board[GRIDSIZE][GRIDSIZE], int myColor) {
                    + (myScore.mobility - oppScore.mobility) * WEIGHT_MOBILITY
                    + (myScore.centerBonus - oppScore.centerBonus) * WEIGHT_CENTER;
     
+    auto endTime = chrono::high_resolution_clock::now();
+    chrono::duration<double, std::milli> evalDuration = endTime - startTime;
+    perfStats.evaluateBoardTime += evalDuration.count();
     return totalScore;
 }
 
@@ -591,6 +606,7 @@ vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color
 // 第二阶段：对走法评分（完整走法 = 皇后移动 + 射箭）
 // 使用快速启发式评分：隔断性 + 阻止对手灵活性
 int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
+    auto startTime = chrono::high_resolution_clock::now();
     // 不需要执行完整走法，只需评估障碍位置
     int x2 = move.x2, y2 = move.y2;
     
@@ -617,7 +633,10 @@ int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
     }
     
     // 综合评分：隔断性权重更高
-    return blockCount * 10 + oppCount * 5;
+    auto endTime = chrono::high_resolution_clock::now();
+    chrono::duration<double, std::milli> evalDuration = endTime - startTime;
+    perfStats.evaluateMoveTime += evalDuration.count();
+    return blockCount * 2 + oppCount * 5;
 }
 
 // 第二阶段：从选定的皇后移动生成完整走法，并筛选前K2个
@@ -626,42 +645,48 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
                                    int color, int k2) {
     
     vector<pair<int, Move>> scoredMoves;  // (score, move)
-    
+    scoredMoves.reserve(queenMoves.size() * 8 * (GRIDSIZE - 1));
+
     for(const auto& qm : queenMoves) {
-        // 临时移动皇后
-        int tempBoard[GRIDSIZE][GRIDSIZE];
-        copyBoard(tempBoard, board);
-        tempBoard[qm.x0][qm.y0] = 0;
-        tempBoard[qm.x1][qm.y1] = color;
+        // 逻辑占用查询：避免为每个皇后复制棋盘
+        auto cellAt = [&](int x, int y) {
+            if(x == qm.x0 && y == qm.y0) return 0;      // 原位置视为空
+            if(x == qm.x1 && y == qm.y1) return color;  // 新位置视为己方
+            return board[x][y];
+        };
+
         // 生成所有可能的射箭位置
         for(int k = 0; k < 8; k++) {
             for(int delta = 1; delta < GRIDSIZE; delta++) {
-                int x2 = qm.x1 + dx[k] * delta;
-                int y2 = qm.y1 + dy[k] * delta;
-                
+                const int x2 = qm.x1 + dx[k] * delta;
+                const int y2 = qm.y1 + dy[k] * delta;
                 if(!inMap(x2, y2)) break;
-                
-                // 可以射到原位置（已经空了）或空格
-                if(tempBoard[x2][y2] != 0 && !(x2 == qm.x0 && y2 == qm.y0)) break;
-                
-                // 创建完整走法
+
+                // 射线遇到非空则终止；原位置已被视为0，无需特判
+                if(cellAt(x2, y2) != 0) break;
+
                 Move fullMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2);
                 int score = scoreFullMove(board, fullMove, color);
-                
                 scoredMoves.push_back({score, fullMove});
             }
         }
-        
     }
-    // 按得分降序排序
+
+    // 仅截取前K2：nth_element + 局部排序，避免全量排序
+    vector<Move> result;
+    if(scoredMoves.empty()) return result;
+
+    if((int)scoredMoves.size() > k2) {
+        nth_element(scoredMoves.begin(), scoredMoves.begin() + k2, scoredMoves.end(),
+                    [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
+        scoredMoves.resize(k2);
+    }
     sort(scoredMoves.begin(), scoredMoves.end(),
          [](const pair<int,Move>& a, const pair<int,Move>& b) { return a.first > b.first; });
-    
-    // 只保留前K2个
-    vector<Move> result;
-    int count = min(k2, (int)scoredMoves.size());
-    for(int i = 0; i < count; i++) {
-        result.push_back(scoredMoves[i].second);
+
+    result.reserve(scoredMoves.size());
+    for(auto& item : scoredMoves) {
+        result.push_back(item.second);
     }
     
     return result;
@@ -669,20 +694,22 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
 
 // 两阶段走法生成主函数
 vector<Move> generateMovesWithTwoPhase(int board[GRIDSIZE][GRIDSIZE], int color) {
-    auto phaseStartTime = chrono::high_resolution_clock::now();
+    auto phase1StartTime = chrono::high_resolution_clock::now();
     
     // 第一阶段：生成并筛选皇后移动位置
     vector<QueenMove> topQueenMoves = generateTopQueenMoves(board, color, K1_QUEEN_MOVES);
     if(topQueenMoves.empty()) {
         return vector<Move>();  // 无法移动
     }
-    
+    auto phase1EndTime = chrono::high_resolution_clock::now();
+    auto phase1Duration = chrono::duration_cast<chrono::microseconds>(phase1EndTime - phase1StartTime).count();
+    perfStats.totalphase1GenMoveTime += phase1Duration / 1000.0;  // 转换为毫秒
     // 第二阶段：生成并筛选完整走法
     vector<Move> topFullMoves = generateTopFullMoves(board, topQueenMoves, color, K2_FULL_MOVES);
 
     auto phaseEndTime = chrono::high_resolution_clock::now();
-    auto phaseDuration = chrono::duration_cast<chrono::microseconds>(phaseEndTime - phaseStartTime).count();
-    perfStats.totalGenMoveTime += phaseDuration / 1000.0;  // 转换为毫秒
+    auto phaseDuration = chrono::duration_cast<chrono::microseconds>(phaseEndTime - phase1EndTime).count();
+    perfStats.totalphase2GenMoveTime += phaseDuration / 1000.0;  // 转换为毫秒
     
     return topFullMoves;
 }
