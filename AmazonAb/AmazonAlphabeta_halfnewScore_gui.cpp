@@ -40,7 +40,7 @@ int dy[] = { -1,0,1,-1,1,-1,0,1 };
 
 int searchDepth = 3; // Alpha-Beta搜索深度
 const int K1_QUEEN_MOVES = 500;   // 第一阶段保留的皇后移动位置数
-const int K2_FULL_MOVES = 50;    // 第二阶段保留的完整走法数
+const int K2_FULL_MOVES = 80;    // 第二阶段保留的完整走法数
 const int INF = 1000000000; // 无穷大值
 
 // 中盘阈值参数
@@ -96,6 +96,17 @@ struct PerfStats {
         cout << "Evaluate Board total: " << evaluateBoardTime << " ms";
         if(evaluateBoardCount > 0) cout << " | avg: " << (evaluateBoardTime / evaluateBoardCount) << " ms/call";
         cout << "\n";
+        
+        cout << "Evaluate Move total: " << evaluateMoveTime << " ms";
+        if(evaluateMoveCount > 0) cout << " | avg: " << (evaluateMoveTime / evaluateMoveCount) << " ms/call";
+        cout << "\n";
+        cout << "Phase 2 Move Preparation total: " << phase2PrepMoveTime << " ms\n";
+        cout << "Phase 2 Move Generation total: " << phase2MoveinGenerateTime << " ms\n";
+        cout << "Phase 2 Before Move Score total: " << phase2BeforeMoveScore << " ms\n";
+        cout<<"phase2 Move Score in FullMove total: "<< phase2MoveScoreInF << " ms\n";
+        cout << "Phase 2 Move Sorting total: " << phase2SortMoveTime << " ms\n";
+        
+        cout << "Total time: " << totalTime << " ms\n";
         cout << "================================\n";
     }
 } perfStats;
@@ -438,207 +449,6 @@ int evaluateBoardAdvanced(int board[GRIDSIZE][GRIDSIZE], int myColor) {
 }
 
 // ========== 高级位棋盘评估系统结束 ==========
-
-
-// ========== 快速走法评分器（用于筛选）==========
-/*
- * 设计思路：借鉴Advanced评分的位棋盘高效操作，但简化为快速启发式
- * 
- * 关键评估因素（按重要性排序）：
- * 1. 领地变化 (Territory Delta)：这一步后己方可达空格 vs 对方可达空格的变化
- * 2. 分割效果 (Separation)：障碍是否落在双方争夺的边界区域
- * 3. 压缩效果 (Compression)：障碍是否有效限制对手皇后的活动空间
- * 4. 己方灵活性 (My Mobility)：皇后移动后的即时活动空间
- * 
- * 使用位棋盘的一步国王扩展来快速估算领地，避免完整BFS
- */
-
-struct FastMoveScorer {
-    u64 umap;           // 空格位图
-    u64 myPieces;       // 己方棋子
-    u64 oppPieces;      // 对方棋子
-    u64 myReach;        // 己方一步可达
-    u64 oppReach;       // 对方一步可达
-    u64 contested;      // 双方争夺区域
-    int blankCount;     // 空格数
-    
-    // 单步邻域扩展（国王移动）
-    inline u64 expandOneStep(u64 pieces, u64 canGo) {
-        u64 result = pieces;
-        result |= (pieces >> 1 & DIR_WEST) | (pieces << 1 & DIR_EAST);
-        result |= (pieces >> 8 & DIR_NORTH) | (pieces << 8 & DIR_SOUTH);
-        result |= (pieces >> 9 & DIR_NW) | (pieces << 9 & DIR_SE);
-        result |= (pieces >> 7 & DIR_NE) | (pieces << 7 & DIR_SW);
-        return result & canGo;
-    }
-    
-    // 多步扩展（用于快速领地估算，2-3步足够）
-    inline u64 expandNSteps(u64 pieces, u64 canGo, int steps) {
-        u64 result = pieces;
-        for(int i = 0; i < steps; i++) {
-            result = expandOneStep(result, canGo);
-        }
-        return result;
-    }
-    
-    // 沿一个方向滑动扩展（皇后移动）
-    inline u64 slideOne(u64 a, int shift, u64 num, u64 dir, u64 can) {
-        u64 result = a;
-        for(int i = 0; i < 7; i++) {
-            u64 next = (shift > 0 ? result << num : result >> num) & dir & can;
-            if(next == 0) break;
-            result |= next;
-        }
-        return result;
-    }
-    
-    // 皇后可达区域（一次皇后移动）
-    inline u64 queenReach(u64 pieces, u64 canGo) {
-        u64 result = pieces;
-        u64 mask = canGo | pieces;
-        result |= slideOne(pieces, -1, 1, DIR_WEST, mask);
-        result |= slideOne(pieces, 1, 1, DIR_EAST, mask);
-        result |= slideOne(pieces, -1, 8, DIR_NORTH, mask);
-        result |= slideOne(pieces, 1, 8, DIR_SOUTH, mask);
-        result |= slideOne(pieces, -1, 9, DIR_NW, mask);
-        result |= slideOne(pieces, 1, 9, DIR_SE, mask);
-        result |= slideOne(pieces, -1, 7, DIR_NE, mask);
-        result |= slideOne(pieces, 1, 7, DIR_SW, mask);
-        return result;
-    }
-    
-    // 初始化：将棋盘转换为位图
-    void init(int board[GRIDSIZE][GRIDSIZE], int myColor) {
-        umap = myPieces = oppPieces = 0;
-        blankCount = 0;
-        
-        for(int i = 0; i < GRIDSIZE; i++) {
-            for(int j = 0; j < GRIDSIZE; j++) {
-                int bit = i * 8 + j;
-                if(board[i][j] == 0) {
-                    umap |= (1ULL << bit);
-                    blankCount++;
-                } else if(board[i][j] == myColor) {
-                    myPieces |= (1ULL << bit);
-                } else if(board[i][j] == -myColor) {
-                    oppPieces |= (1ULL << bit);
-                }
-            }
-        }
-        
-        // 预计算双方的可达区域（2步国王扩展作为快速估算）
-        myReach = expandNSteps(myPieces, umap | myPieces, 2);
-        oppReach = expandNSteps(oppPieces, umap | oppPieces, 2);
-        contested = myReach & oppReach;  // 双方都能到达的争夺区域
-    }
-    
-    // 快速评分：皇后移动 + 障碍位置
-    // 返回值越大越好
-    int scoreMove(int x0, int y0, int x1, int y1, int x2, int y2, int myColor) {
-        int score = 0;
-        
-        // 位置转bit索引
-        int bit0 = x0 * 8 + y0;  // 皇后原位置
-        int bit1 = x1 * 8 + y1;  // 皇后新位置
-        int bit2 = x2 * 8 + y2;  // 障碍位置
-        u64 mask0 = 1ULL << bit0;
-        u64 mask1 = 1ULL << bit1;
-        u64 mask2 = 1ULL << bit2;
-        
-        // === 1. 障碍落在争夺区域得分（分割效果）===
-        // 如果障碍落在双方都能到达的区域，说明有效分割
-        if(contested & mask2) {
-            score += 15;
-        }
-        
-        // === 2. 压缩效果：障碍是否靠近对手 ===
-        // 检查障碍的8邻域中对手棋子数量
-        u64 arrowNeighbor = expandOneStep(mask2, 0xFFFFFFFFFFFFFFFFULL);
-        int oppNearArrow = popcnt(arrowNeighbor & oppPieces);
-        score += oppNearArrow * 8;  // 靠近对手皇后是好事
-        
-        // === 3. 障碍阻断对手可达区域 ===
-        // 如果障碍落在对手可达但己方不可达的区域，削弱对手
-        if((oppReach & mask2) && !(myReach & mask2)) {
-            score += 12;
-        }
-        
-        // === 4. 皇后新位置的灵活性 ===
-        // 模拟移动后，计算皇后的即时可达格子数
-        u64 newUmap = (umap & ~mask2) | mask0;  // 障碍位置移除，原位置空出
-        newUmap &= ~mask1;  // 新位置被皇后占据
-        u64 newMyPieces = (myPieces & ~mask0) | mask1;
-        
-        // 从新位置计算皇后可达
-        u64 queenMob = queenReach(mask1, newUmap);
-        int mobility = popcnt(queenMob);
-        score += mobility;  // 灵活性直接加分
-        
-        // === 5. 领地变化（简化估算）===
-        // 新状态下己方2步可达 vs 对方2步可达
-        u64 newMyReach = expandNSteps(newMyPieces, newUmap | newMyPieces, 2);
-        u64 newOppReach = expandNSteps(oppPieces, newUmap | oppPieces, 2);
-        
-        int myTerritory = popcnt(newMyReach & ~newOppReach);  // 己方独占
-        int oppTerritory = popcnt(newOppReach & ~newMyReach); // 对方独占
-        score += (myTerritory - oppTerritory) * 2;
-        
-        // === 6. 中心性加成 ===
-        int centerBonus = 4 - abs(x1 - 3) - abs(y1 - 3);  // 靠近(3,3)得分
-        score += centerBonus;
-        
-        return score;
-    }
-    
-    // 快速评分：仅皇后移动（第一阶段用）
-    // 不需要考虑障碍，只评估皇后新位置的好坏
-    int scoreQueenMoveOnly(int x0, int y0, int x1, int y1) {
-        int score = 0;
-        
-        int bit0 = x0 * 8 + y0;
-        int bit1 = x1 * 8 + y1;
-        u64 mask0 = 1ULL << bit0;
-        u64 mask1 = 1ULL << bit1;
-        
-        // 模拟移动后的状态
-        u64 newUmap = umap | mask0;  // 原位置空出
-        newUmap &= ~mask1;           // 新位置被占据
-        u64 newMyPieces = (myPieces & ~mask0) | mask1;
-        
-        // === 1. 皇后新位置的灵活性（皇后移动范围）===
-        u64 queenMob = queenReach(mask1, newUmap);
-        int mobility = popcnt(queenMob);
-        score += mobility * 3;
-        
-        // === 2. 新位置周围的空白格数（8邻域）===
-        u64 neighbor = expandOneStep(mask1, 0xFFFFFFFFFFFFFFFFULL) & ~mask1;
-        int emptyNear = popcnt(neighbor & newUmap);
-        score += emptyNear * 2;
-        
-        // === 3. 中心性加成 ===
-        int centerBonus = 4 - abs(x1 - 3) - abs(y1 - 3);
-        score += centerBonus;
-        
-        // === 4. 进入争夺区域加分 ===
-        if(contested & mask1) {
-            score += 5;  // 进入双方争夺的核心区域
-        }
-        
-        // === 5. 远离对手皇后（安全性）===
-        // 但不要太远以至于失去控制
-        u64 oppNeighbor = expandNSteps(oppPieces, umap | oppPieces, 1);
-        if(oppNeighbor & mask1) {
-            score += 3;  // 能威胁到对手也是好事
-        }
-        
-        return score;
-    }
-};
-
-// 全局快速评分器实例（避免重复创建）
-FastMoveScorer globalFastScorer;
-
-// ========== 快速走法评分器结束 ==========
 
 
 // 路径结构：存储从起点到终点的所有点
@@ -1147,12 +957,8 @@ int scoreQueenMove(int board[GRIDSIZE][GRIDSIZE], int x0, int y0, int x1, int y1
 }
 
 // 第一阶段：生成并筛选前K1个最佳皇后移动位置
-// 使用快速位棋盘评分
 vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color, int k1) {
     vector<QueenMove> allQueenMoves;
-    
-    // 初始化快速评分器（只需一次）
-    globalFastScorer.init(board, color);
     
     // 遍历所有该颜色的皇后
     for(int i = 0; i < GRIDSIZE; i++) {
@@ -1167,24 +973,22 @@ vector<QueenMove> generateTopQueenMoves(int board[GRIDSIZE][GRIDSIZE], int color
                     
                     if(!inMap(x1, y1) || board[x1][y1] != 0) break;
                     
-                    // 使用快速位棋盘评分
-                    int score = globalFastScorer.scoreQueenMoveOnly(i, j, x1, y1);
+                    // 评估这个移动位置
+                    int score = scoreQueenMove(board, i, j, x1, y1, color);
                     allQueenMoves.push_back(QueenMove(i, j, x1, y1, score));
                 }
             }
         }
     }
     
-    // 使用 nth_element 优化：O(n) 找到前K1个，再局部排序
-    if((int)allQueenMoves.size() > k1) {
-        nth_element(allQueenMoves.begin(), allQueenMoves.begin() + k1, allQueenMoves.end(),
-                    [](const QueenMove& a, const QueenMove& b) { return a.score > b.score; });
-        allQueenMoves.resize(k1);
-    }
-    
-    // 对前K1个排序
+    // 按得分降序排序
     sort(allQueenMoves.begin(), allQueenMoves.end(), 
          [](const QueenMove& a, const QueenMove& b) { return a.score > b.score; });
+    
+    // 只保留前K1个
+    if((int)allQueenMoves.size() > k1) {
+        allQueenMoves.resize(k1);
+    }
     
     return allQueenMoves;
 }
@@ -1222,15 +1026,11 @@ int scoreFullMove(int board[GRIDSIZE][GRIDSIZE], const Move& move, int color) {
 }
 
 // 第二阶段：从选定的皇后移动生成完整走法，并筛选前K2个
-// 使用快速位棋盘评分器
 vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE], 
                                    const vector<QueenMove>& queenMoves, 
                                    int color, int k2) {
     vector<pair<int, Move>> scoredMoves;  // (score, move)
     scoredMoves.reserve(queenMoves.size() * 8 * (GRIDSIZE - 1));
-    
-    // 初始化快速评分器（只需一次）
-    globalFastScorer.init(board, color);
     
     for(const auto& qm : queenMoves) {
         // 逻辑占用查询：避免为每个皇后复制棋盘
@@ -1253,8 +1053,7 @@ vector<Move> generateTopFullMoves(int board[GRIDSIZE][GRIDSIZE],
 
                 Move fullMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2);
                 
-                // 使用快速位棋盘评分
-                int score = globalFastScorer.scoreMove(qm.x0, qm.y0, qm.x1, qm.y1, x2, y2, color);
+                int score = scoreFullMove(board, fullMove, color);
                 scoredMoves.push_back({score, fullMove});
             }
         }
@@ -1575,7 +1374,8 @@ int main(){
             "Controls:",
             "S - Save game",
             "L - Load game",
-            "C - Reset and Switch sides",
+            "A - Manual AI move",
+            "C - Switch human color",
             "R - Reset game"
         };
 
@@ -1614,29 +1414,24 @@ int main(){
             if(e.type==sf::Event::KeyPressed){
                 if(e.key.code==sf::Keyboard::S) saveGame();
                 if(e.key.code==sf::Keyboard::L) loadGame();
-                if(e.key.code==sf::Keyboard::C) {
-                    memset(gridInfo,0,sizeof(gridInfo));
-                    gridInfo[0][2]=gridInfo[2][0]=gridInfo[5][0]=gridInfo[7][2]=grid_black;
-                    gridInfo[0][5]=gridInfo[2][7]=gridInfo[5][7]=gridInfo[7][5]=grid_white;
-                    currentTurn = grid_black;
-                    gameStatus = GAME_ONGOING;
-                    needAIMove = false;
+                if(e.key.code==sf::Keyboard::A) {
+                    // 清除用户的选择状态
                     selX=selY=moveX=moveY=-1;
                     validMovePaths.clear();
                     validObstaclePaths.clear();
+                    // 检查是否是AI的回合
+                    bool isAITurn = (humanIsBlack && currentTurn == grid_white) ||
+                                   (!humanIsBlack && currentTurn == grid_black);
+                    if(isAITurn && gameStatus == GAME_ONGOING) {
+                        aiMove();
 
+                    }
+                }
+                if(e.key.code==sf::Keyboard::C) {
                     humanIsBlack=!humanIsBlack;
                     selX=selY=moveX=moveY=-1;
                     validMovePaths.clear();
                     validObstaclePaths.clear();
-                    cout << "[Switched sides: Human is now " << (humanIsBlack ? "BLACK" : "WHITE") << "]\n";
-                    // 切换后，如果现在是AI回合，自动触发AI走棋
-                    bool isAITurn = (humanIsBlack && currentTurn == grid_white) ||
-                                   (!humanIsBlack && currentTurn == grid_black);
-                    if(isAITurn && gameStatus == GAME_ONGOING) {
-                        cout << "[Auto-triggering AI move after switch]\n";
-                        aiMove();
-                    }
                 }
                 if(e.key.code==sf::Keyboard::R){
                     memset(gridInfo,0,sizeof(gridInfo));
@@ -1648,7 +1443,6 @@ int main(){
                     selX=selY=moveX=moveY=-1;
                     validMovePaths.clear();
                     validObstaclePaths.clear();
-                    cout<<"[Game reset]\n";
                 }
             }
 
